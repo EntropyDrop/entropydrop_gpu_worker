@@ -123,15 +123,26 @@ def report_status(log_id: str, status: str, result: str = None, edited_result: s
     redis_conn.lpush("generate_results", json.dumps(payload))
 
 def process_and_upload_final_skin(img_data_bytes: bytes, s3id_result: str, is_public: bool) -> str:
+    t_start = time.time()
     img = Image.open(io.BytesIO(img_data_bytes))
     img = img.crop((0, 0, img.width // 2, img.height // 2))
+    
+    t_bg = time.time()
     img = remove_bg(img)
+    
+    t_voxel = time.time()
     img = resolve_voxel_consistency(img)
-
+    
+    t_post = time.time()
     img_io = io.BytesIO()
     img.save(img_io, format='PNG')
     filename = f"generations/{s3id_result}.png"
+    
+    t_up = time.time()
     upload_to_s3(img_io.getvalue(), filename, is_public, "image/png")
+    t_end = time.time()
+    
+    print(f"[*] Crop/Format: {t_bg - t_start:.2f}s, RemoveBG: {t_voxel - t_bg:.2f}s, Voxel: {t_post - t_voxel:.2f}s, S3 Upload: {t_end - t_up:.2f}s, Total post-process: {t_end - t_start:.2f}s")
     return filename
 
 async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, model_version: str, seed: int, n_step: int, guidance: float):
@@ -148,6 +159,8 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
         # Force-disable progress bar before each call and redirect tqdm output to devnull
         import os as _os
         text_to_img_pipe.set_progress_bar_config(disable=True, file=open(_os.devnull, 'w'))
+        
+        t_pipe_start = time.time()
         pipeline_output = text_to_img_pipe(
             prompt=prompt or "",
             height=1024,
@@ -158,6 +171,9 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
             generator=torch.Generator("cuda").manual_seed(seed if seed is not None else 42),
         )
         images = pipeline_output.images
+        t_pipe_end = time.time()
+        print(f"[*] [{log_id}] ZImagePipeline inference took {t_pipe_end - t_pipe_start:.2f}s")
+        
         # Convert generated image to JPEG bytes
         img_io = io.BytesIO()
 
@@ -169,7 +185,11 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
         # upload intermediate
         s3id_result = uuid.uuid4().hex
         intermediate_filename = f"edited/{s3id_result}.jpg"
+        
+        t_up_start = time.time()
         upload_to_s3(img_data, intermediate_filename, is_public, "image/jpeg")
+        t_up_end = time.time()
+        print(f"[*] [{log_id}] Upload intermediate to S3 took {t_up_end - t_up_start:.2f}s")
         
         # Report status and write intermediate image back immediately so user gets preview
         report_status(log_id, "pending_skin", edited_result=intermediate_filename)
@@ -200,7 +220,10 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
     try:
         report_status(log_id, "processing")
         
+        t_dl_start = time.time()
         file_content = download_from_s3(source, is_public)
+        t_dl_end = time.time()
+        print(f"[*] [{log_id}] Download image from S3 took {t_dl_end - t_dl_start:.2f}s")
 
         global img_edit_pipe
         if img_edit_pipe is None:
@@ -214,6 +237,8 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
         # Prevents BrokenPipeError caused by tqdm flushing stderr after SSH disconnection
         import os as _os
         img_edit_pipe.set_progress_bar_config(disable=True, file=open(_os.devnull, 'w'))
+        
+        t_pipe_start = time.time()
         pipeline_output = img_edit_pipe(
             image=img,
             prompt=prompt or "",
@@ -225,6 +250,9 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
             generator=torch.Generator("cuda").manual_seed(seed if seed is not None else 42),
         )
         images = pipeline_output.images
+        t_pipe_end = time.time()
+        print(f"[*] [{log_id}] Flux2KleinPipeline (edit) inference took {t_pipe_end - t_pipe_start:.2f}s")
+        
         # Convert generated image to JPEG bytes
         img_io = io.BytesIO()
         images[0].convert("RGB").save(img_io, format="JPEG", quality=95)
@@ -232,7 +260,11 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
             
         s3id_result = uuid.uuid4().hex
         intermediate_filename = f"edited/{s3id_result}.jpg"
+        
+        t_up_start = time.time()
         upload_to_s3(img_data, intermediate_filename, is_public, "image/jpeg")
+        t_up_end = time.time()
+        print(f"[*] [{log_id}] Upload intermediate to S3 took {t_up_end - t_up_start:.2f}s")
         
         # Report status and write intermediate image back immediately so user gets preview
         report_status(log_id, "pending_skin", edited_result=intermediate_filename)
@@ -263,7 +295,10 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
     try:
         report_status(log_id, "processing_skin")
         
+        t_dl_start = time.time()
         file_content = download_from_s3(source, is_public)
+        t_dl_end = time.time()
+        print(f"[*] [{log_id}] Download image from S3 took {t_dl_end - t_dl_start:.2f}s")
 
         global img_to_skin_pipe, current_lora_name
         if img_to_skin_pipe is None:
@@ -288,9 +323,10 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
                     print(f"[*] LoRA switched to: {requested_lora} (unload: {t1-t0:.2f}s, load: {t2-t1:.2f}s, total: {t2-t0:.2f}s)")
                 except Exception as le:
                     print(f"[*] Failed to switch LoRA to {requested_lora}: {le}")
-                    # Keep current_lora_name as is, or set to None if corrupted
+                    # Raise the exception to terminate the task immediately
+                    raise le
             else:
-                print(f"[*] Requested LoRA file not found: {requested_lora}")
+                raise FileNotFoundError(f"Requested LoRA file not found: {requested_lora}")
             
         # Use local Flux2KleinPipeline to generate skin image
         img = Image.open(io.BytesIO(file_content)).convert("RGBA")
@@ -298,6 +334,8 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
         # Prevents BrokenPipeError caused by tqdm flushing stderr after SSH disconnection
         import os as _os
         img_to_skin_pipe.set_progress_bar_config(disable=True, file=open(_os.devnull, 'w'))
+        
+        t_pipe_start = time.time()
         pipeline_output = img_to_skin_pipe(
             image=img,
             prompt=prompt or "",
@@ -309,6 +347,9 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
             generator=torch.Generator("cuda").manual_seed(seed if seed is not None else 42),
         )
         images = pipeline_output.images
+        t_pipe_end = time.time()
+        print(f"[*] [{log_id}] Flux2KleinPipeline (skin) inference took {t_pipe_end - t_pipe_start:.2f}s")
+        
         # Convert generated image to PNG bytes
         img_io = io.BytesIO()
         images[0].save(img_io, format="PNG")
@@ -316,7 +357,11 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
 
         # Post process
         s3id_result = uuid.uuid4().hex
+        
+        t_post_start = time.time()
         final_filename = process_and_upload_final_skin(img_data, s3id_result, is_public)
+        t_post_end = time.time()
+        print(f"[*] [{log_id}] Complete post-processing and final upload took {t_post_end - t_post_start:.2f}s")
 
         report_status(log_id, "success", result=final_filename, edited_result=intermediate_filename)
     except Exception as e:
