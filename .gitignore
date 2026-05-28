@@ -82,3 +82,5 @@ dmypy.json
 
 # Ruff stuff
 .ruff_cache/
+
+entrypoint.sh

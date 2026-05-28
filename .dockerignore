@@ -1,0 +1,12 @@
+Dockerfile
+.git
+.gitignore
+.env
+.env.prod
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.antigravityignore
+*.md
+entrypoint.sh
