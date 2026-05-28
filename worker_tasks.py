@@ -33,7 +33,6 @@ img_to_skin_pipe = None
 img_edit_pipe = None
 text_to_img_pipe = None
 skin_gen_prompt_embeds = None
-skin_gen_text_ids = None
 
 # Track currently loaded LoRA for img_to_skin_pipe
 current_lora_name = None
@@ -88,7 +87,7 @@ def init_img_edit_pipeline():
     return img_edit_pipe
 
 def init_img_to_skin_pipeline():
-    global img_to_skin_pipe, current_lora_name, skin_gen_prompt_embeds, skin_gen_text_ids
+    global img_to_skin_pipe, current_lora_name, skin_gen_prompt_embeds
     if img_to_skin_pipe is not None:
         return img_to_skin_pipe
     import torch
@@ -111,11 +110,12 @@ def init_img_to_skin_pipeline():
     #img_to_skin_pipe.load_lora_weights(settings.FLUX_LORA_PATH)
     img_to_skin_pipe.set_progress_bar_config(disable=True)
 
-    skin_gen_prompt_embeds, skin_gen_text_ids = img_to_skin_pipe.encode_prompt(
+    prompt_encoding = img_to_skin_pipe.encode_prompt(
         prompt="",
         device="cuda",
         num_images_per_prompt=1
     )
+    skin_gen_prompt_embeds = prompt_encoding[0] if isinstance(prompt_encoding, tuple) else prompt_encoding
     print("[*] Model loaded.")
     return img_to_skin_pipe
 # Pipeline variable for lazy initialization
@@ -308,7 +308,7 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
         t_dl_end = time.time()
         print(f"[*] [{log_id}] Download image from S3 took {t_dl_end - t_dl_start:.2f}s")
 
-        global img_to_skin_pipe, current_lora_name, skin_gen_prompt_embeds, skin_gen_text_ids
+        global img_to_skin_pipe, current_lora_name, skin_gen_prompt_embeds
         if img_to_skin_pipe is None:
             print("[*] Lazy loading Flux2KleinPipeline (Fallback)...")
             init_img_to_skin_pipeline()
@@ -346,9 +346,8 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
         t_pipe_start = time.time()
         pipeline_output = img_to_skin_pipe(
             image=img,
-            prompt="",
+            prompt=None,
             prompt_embeds = skin_gen_prompt_embeds,
-            text_ids = skin_gen_text_ids,
             height=768,
             width=768,
             num_inference_steps=n_step if n_step is not None else 100,
