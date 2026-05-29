@@ -125,7 +125,7 @@ def init_img_to_skin_pipeline():
 from utils import remove_bg
 
 def make_generation_job_id(log_id: str, stage: str) -> str:
-    return f"generation:{log_id}:{stage}"
+    return f"generation_{log_id}_{stage}"
 
 
 def get_registry_job_ids(registry):
