@@ -12,7 +12,9 @@ from mc_voxel_texture_resolver import resolve_voxel_consistency
 import asyncio
 import json
 import redis
-from rq import Queue, Retry
+from rq import Queue, Retry, get_current_job
+from rq.job import Job
+from rq.registry import StartedJobRegistry, DeferredJobRegistry, ScheduledJobRegistry
 from diffusers import Flux2KleinPipeline
 import torch
 redis_conn = redis.from_url(
@@ -27,6 +29,7 @@ q_t2i = Queue('queue_text_to_image', connection=redis_conn)
 q_edit = Queue('queue_image_edit', connection=redis_conn)
 q_skin = Queue('queue_image_to_skin', connection=redis_conn)
 retry_policy = Retry(max=99999, interval=[5, 10, 30, 60])
+RESULT_QUEUE_KEY = os.getenv("GENERATE_RESULT_QUEUE_KEY", "generate_results")
 
 # Pipeline variable initialized by run_worker.py
 img_to_skin_pipe = None
@@ -121,14 +124,81 @@ def init_img_to_skin_pipeline():
 # Pipeline variable for lazy initialization
 from utils import remove_bg
 
-def report_status(log_id: str, status: str, result: str = None, edited_result: str = None, error_msg: str = None, source: str = None):
+def make_generation_job_id(log_id: str, stage: str) -> str:
+    return f"generation:{log_id}:{stage}"
+
+
+def get_registry_job_ids(registry):
+    try:
+        return registry.get_job_ids(cleanup=False)
+    except TypeError:
+        return registry.get_job_ids()
+
+
+def fetch_active_job(queue: Queue, job_id: str):
+    try:
+        if job_id in queue.get_job_ids():
+            return Job.fetch(job_id, connection=redis_conn)
+    except Exception:
+        pass
+
+    try:
+        intermediate_queue = getattr(queue, "intermediate_queue", None)
+        if intermediate_queue and job_id in intermediate_queue.get_job_ids():
+            return Job.fetch(job_id, connection=redis_conn)
+    except Exception:
+        pass
+
+    for RegistryCls in [StartedJobRegistry, DeferredJobRegistry, ScheduledJobRegistry]:
+        try:
+            registry = RegistryCls(name=queue.name, connection=redis_conn)
+            if job_id in get_registry_job_ids(registry):
+                return Job.fetch(job_id, connection=redis_conn)
+        except Exception:
+            pass
+    return None
+
+
+def get_job_intermediate_filename(job, fallback: str) -> str:
+    try:
+        if job and job.kwargs and job.kwargs.get("intermediate_filename"):
+            return job.kwargs["intermediate_filename"]
+        if job and job.args and len(job.args) >= 3:
+            return job.args[2]
+    except Exception:
+        pass
+    return fallback
+
+
+def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filename: str, prompt: str, guidance: float, model_version: str, seed: int, n_step: int, queue_prefix: str):
+    target_q_skin = Queue(f"{queue_prefix}queue_image_to_skin", connection=redis_conn)
+    job_id = make_generation_job_id(log_id, "image_to_skin")
+    active_job = fetch_active_job(target_q_skin, job_id)
+    if active_job:
+        print(f"[*] [{log_id}] image_to_skin job already active: {job_id}")
+        return active_job, False
+
+    job = target_q_skin.enqueue(
+        "worker_tasks.task_image_to_skin",
+        args=(log_id, is_public, intermediate_filename, "image/jpeg", prompt),
+        kwargs={"intermediate_filename": intermediate_filename, "guidance": guidance, "model_version": model_version, "seed": seed, "n_step": n_step},
+        job_timeout='130s',
+        retry=retry_policy,
+        result_ttl=10,
+        job_id=job_id
+    )
+    return job, True
+
+
+def report_status(log_id: str, status: str, result: str = None, edited_result: str = None, error_msg: str = None, source: str = None, stage: str = None):
     """Push status report to Redis"""
     payload = {"log_id": log_id, "status": status}
     if result is not None: payload["result"] = result
     if edited_result is not None: payload["edited_result"] = edited_result
     if error_msg is not None: payload["error_msg"] = error_msg
     if source is not None: payload["source"] = source
-    redis_conn.lpush("generate_results", json.dumps(payload))
+    if stage is not None: payload["stage"] = stage
+    redis_conn.lpush(RESULT_QUEUE_KEY, json.dumps(payload))
 
 def process_and_upload_final_skin(img_data_bytes: bytes, s3id_result: str, is_public: bool) -> str:
     t_start = time.time()
@@ -155,7 +225,7 @@ def process_and_upload_final_skin(img_data_bytes: bytes, s3id_result: str, is_pu
 
 async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, model_version: str, seed: int, n_step: int, guidance: float):
     try:
-        report_status(log_id, "processing")
+        report_status(log_id, "processing", stage="text_to_image")
         
         global text_to_img_pipe
         if text_to_img_pipe is None:
@@ -199,34 +269,41 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
         t_up_end = time.time()
         print(f"[*] [{log_id}] Upload intermediate to S3 took {t_up_end - t_up_start:.2f}s")
         
-        # Report status and write intermediate image back immediately so user gets preview
-        report_status(log_id, "pending_skin", edited_result=intermediate_filename)
-        
         # Dispatch to the specialized queue for the next stage: image_to_skin
-        from rq import get_current_job
         job = get_current_job()
         current_queue_name = job.origin if job else ""
         prefix = "high_" if current_queue_name.startswith("high_") else ""
-        
-        target_q_skin = Queue(f"{prefix}queue_image_to_skin", connection=redis_conn)
-        
-        target_q_skin.enqueue(
-            "worker_tasks.task_image_to_skin",
-            args=(log_id, is_public, intermediate_filename, "image/jpeg", prompt),
-            kwargs={"intermediate_filename": intermediate_filename, "guidance": guidance, "model_version": model_version, "seed": seed, "n_step": n_step},
-            job_timeout='130s',
-            retry=retry_policy
+
+        skin_job, _ = enqueue_image_to_skin_once(
+            log_id,
+            is_public,
+            intermediate_filename,
+            prompt,
+            guidance,
+            model_version,
+            seed,
+            n_step,
+            prefix,
+        )
+
+        # Report after stage 2 is durably enqueued so a crash cannot leave
+        # the DB in pending_skin without a follow-up Redis job.
+        report_status(
+            log_id,
+            "pending_skin",
+            edited_result=get_job_intermediate_filename(skin_job, intermediate_filename),
+            stage="text_to_image",
         )
     except Exception as e:
         import traceback
         err_detail = traceback.format_exc()
         print(f"[{log_id}] Text-to-image Task failed with exception:\n{err_detail}")
-        report_status(log_id, "failed", error_msg=f"{str(e)}\n\n{err_detail}")
+        report_status(log_id, "failed", error_msg=f"{str(e)}\n\n{err_detail}", stage="text_to_image")
         raise e
 
 async def task_image_edit_async(log_id: str, is_public: bool, source: str, content_type: str, prompt: str, model_version: str, seed: int, n_step: int, guidance: float):
     try:
-        report_status(log_id, "processing")
+        report_status(log_id, "processing", stage="image_edit")
         
         t_dl_start = time.time()
         file_content = download_from_s3(source, is_public)
@@ -274,34 +351,41 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
         t_up_end = time.time()
         print(f"[*] [{log_id}] Upload intermediate to S3 took {t_up_end - t_up_start:.2f}s")
         
-        # Report status and write intermediate image back immediately so user gets preview
-        report_status(log_id, "pending_skin", edited_result=intermediate_filename)
-        
         # Dispatch to the specialized queue for the next stage: image_to_skin
-        from rq import get_current_job
         job = get_current_job()
         current_queue_name = job.origin if job else ""
         prefix = "high_" if current_queue_name.startswith("high_") else ""
-        
-        target_q_skin = Queue(f"{prefix}queue_image_to_skin", connection=redis_conn)
-        
-        target_q_skin.enqueue(
-            "worker_tasks.task_image_to_skin",
-            args=(log_id, is_public, intermediate_filename, "image/jpeg", prompt),
-            kwargs={"intermediate_filename": intermediate_filename, "guidance": guidance, "model_version": model_version, "seed": seed, "n_step": n_step},
-            job_timeout='130s',
-            retry=retry_policy
+
+        skin_job, _ = enqueue_image_to_skin_once(
+            log_id,
+            is_public,
+            intermediate_filename,
+            prompt,
+            guidance,
+            model_version,
+            seed,
+            n_step,
+            prefix,
+        )
+
+        # Report after stage 2 is durably enqueued so a crash cannot leave
+        # the DB in pending_skin without a follow-up Redis job.
+        report_status(
+            log_id,
+            "pending_skin",
+            edited_result=get_job_intermediate_filename(skin_job, intermediate_filename),
+            stage="image_edit",
         )
     except Exception as e:
         import traceback
         err_detail = traceback.format_exc()
         print(f"[{log_id}] Image-edit Task failed with exception:\n{err_detail}")
-        report_status(log_id, "failed", error_msg=f"{str(e)}\n\n{err_detail}")
+        report_status(log_id, "failed", error_msg=f"{str(e)}\n\n{err_detail}", stage="image_edit")
         raise e
 
 async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, content_type: str, prompt: str, model_version: str = None, seed: int = None, n_step: int = None, guidance: float = None, intermediate_filename: str = None):
     try:
-        report_status(log_id, "processing_skin")
+        report_status(log_id, "processing_skin", stage="image_to_skin")
         
         t_dl_start = time.time()
         file_content = download_from_s3(source, is_public)
@@ -372,12 +456,12 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
         t_post_end = time.time()
         print(f"[*] [{log_id}] Complete post-processing and final upload took {t_post_end - t_post_start:.2f}s")
 
-        report_status(log_id, "success", result=final_filename, edited_result=intermediate_filename)
+        report_status(log_id, "success", result=final_filename, edited_result=intermediate_filename, stage="image_to_skin")
     except Exception as e:
         import traceback
         err_detail = traceback.format_exc()
         print(f"[{log_id}] Task failed with exception:\n{err_detail}")
-        report_status(log_id, "failed", error_msg=f"{str(e)}\n\n{err_detail}")
+        report_status(log_id, "failed", error_msg=f"{str(e)}\n\n{err_detail}", stage="image_to_skin")
         raise e
 
 def task_text_to_image(*args, **kwargs):

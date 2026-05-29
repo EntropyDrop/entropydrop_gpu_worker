@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 # Fix macOS crash due to Objective-C runtime safety checks when Python RQ forks child processes.
 # To ensure this takes effect before all system-level dependencies are loaded, we force-restart the current Python process with this environment variable.
@@ -39,6 +40,7 @@ REDIS_URL = settings.REDIS_URL
 # Bind to a specific GPU (e.g., "0" to use the first card).
 # Can also be set before the startup command: CUDA_VISIBLE_DEVICES=0 python run_worker.py
 GPU_ID = os.getenv("CUDA_VISIBLE_DEVICES", "0")
+WORKER_RESTART_DELAY_SECONDS = int(os.getenv("WORKER_RESTART_DELAY_SECONDS", "5"))
 
 print(f"[*] Starting GPU Worker binding to GPU: {GPU_ID}")
 print(f"[*] Connecting to Redis: {REDIS_URL}")
@@ -57,9 +59,6 @@ print(f"[*] Listening on queues: {listen}")
 conn = Redis.from_url(REDIS_URL, health_check_interval=10, retry_on_timeout=True)
 
 def run_worker():
-    # Initialize Worker with connection
-    queues = [Queue(name, connection=conn) for name in listen]
-    
     worker_cls = Worker
     # Force the use of SimpleWorker if listening to any queue that requires a GPU to prevent CUDA re-initialization and model reloading caused by fork()
     gpu_queues = ['queue_text_to_image', 'queue_image_edit', 'queue_image_to_skin']
@@ -80,12 +79,22 @@ def run_worker():
             
         print("[*] All requested models loaded. Using SimpleWorker to maintain GPU memory.")
         worker_cls = SimpleWorker
-        
-    worker = worker_cls(queues, connection=conn)
-    
-    # Start the work loop.
-    # It blocks and continuously waits for new tasks to arrive.
-    worker.work(with_scheduler=True)
+
+    while True:
+        # Recreate the Worker object after any unexpected work-loop exit so
+        # transient Redis/socket failures do not leave the process idle forever.
+        queues = [Queue(name, connection=conn) for name in listen]
+        worker = worker_cls(queues, connection=conn)
+
+        try:
+            worker.work(with_scheduler=True)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            print(f"[!] Worker loop crashed: {exc}")
+
+        print(f"[*] Worker loop exited. Restarting in {WORKER_RESTART_DELAY_SECONDS}s...")
+        time.sleep(WORKER_RESTART_DELAY_SECONDS)
 
 if __name__ == '__main__':
     try:
