@@ -1,4 +1,6 @@
 import time
+import socket
+import urllib3.util.connection
 import boto3
 from botocore.exceptions import ClientError
 from botocore.config import Config
@@ -8,10 +10,44 @@ from config import settings, load_proxies
 current_proxy_index = 0
 active_s3_client = None
 last_used_proxy = None
+active_proxy_url = None
+
+# --- SOCKS5 Proxy Monkeypatch for urllib3 ---
+_orig_create_connection = urllib3.util.connection.create_connection
+
+def patched_create_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    host, port = address
+    global active_proxy_url
+    
+    # Only proxy S3 outgoing requests to aws S3 domains when a SOCKS proxy is active
+    if host.endswith(".amazonaws.com") and active_proxy_url and active_proxy_url.startswith("socks"):
+        import socks
+        s = socks.socksocket()
+        
+        # Robustly parse SOCKS proxy host and port
+        proxy_host = "localhost"
+        proxy_port = 9000
+        cleaned_proxy = active_proxy_url.replace("socks5h://", "").replace("socks5://", "").replace("socks://", "")
+        if ":" in cleaned_proxy:
+            proxy_host, proxy_port_str = cleaned_proxy.split(":")
+            proxy_port = int(proxy_port_str)
+        else:
+            proxy_host = cleaned_proxy
+            proxy_port = 9000
+            
+        s.set_proxy(socks.SOCKS5, proxy_host, proxy_port, rdns=True)
+        if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+            s.settimeout(timeout)
+        s.connect((host, port))
+        return s
+    else:
+        return _orig_create_connection(address, timeout, source_address)
+
+urllib3.util.connection.create_connection = patched_create_connection
 
 def get_s3_client(force_new=False):
     """Dynamically creates or retrieves the active S3 client configured with the current proxy."""
-    global active_s3_client, current_proxy_index, last_used_proxy
+    global active_s3_client, current_proxy_index, last_used_proxy, active_proxy_url
     
     # Hot-reload proxies list from disk/environment
     proxies_list = load_proxies()
@@ -34,18 +70,27 @@ def get_s3_client(force_new=False):
         'endpoint_url': f"https://s3.{settings.AWS_REGION}.amazonaws.com"
     }
     
+    # Set the active proxy URL for the monkeypatch interceptor
+    active_proxy_url = target_proxy
+    
     # Configure proxy if target proxy is active
     if target_proxy:
         print(f"[*] Initializing S3 client using proxy ({current_proxy_index + 1}/{len(proxies_list)}): {target_proxy}")
-        config = Config(
-            proxies={
-                'http': target_proxy,
-                'https': target_proxy
-            },
-            connect_timeout=15,
-            read_timeout=15
-        )
-        client_args['config'] = config
+        if target_proxy.startswith("socks"):
+            # SOCKS proxy is routed transparently via our urllib3 connection patch.
+            # Do NOT pass it as HTTP/HTTPS proxy to boto3 config to prevent botocore from prepending http://
+            client_args['config'] = Config(connect_timeout=15, read_timeout=15)
+        else:
+            # HTTP/HTTPS proxy is natively supported by botocore
+            config = Config(
+                proxies={
+                    'http': target_proxy,
+                    'https': target_proxy
+                },
+                connect_timeout=15,
+                read_timeout=15
+            )
+            client_args['config'] = config
     else:
         # Standard configuration with high resilience timeouts
         client_args['config'] = Config(connect_timeout=15, read_timeout=15)
