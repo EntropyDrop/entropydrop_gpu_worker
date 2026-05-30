@@ -284,24 +284,40 @@ def spawn_autossh_tunnel(tunnel_type, local_port, hostname, username="ubuntu"):
         raise
 
 def update_config_files():
-    """Writes the active tunnel endpoints into redis_urls.txt and proxies.txt."""
+    """Writes the active tunnel endpoints into redis_urls.txt and proxies.txt atomically."""
     redis_password = settings.AWS_REDIS_PASSWORD
     
     # Single entry-point endpoints
     redis_url = f"redis://:{redis_password}@127.0.0.1:{REDIS_PORT}/0"
     proxy_url = f"http://127.0.0.1:{HTTP_PROXY_PORT}"
     
-    # Write redis_urls.txt
-    print(f"[*] Re-writing {REDIS_FILE}...")
-    with open(REDIS_FILE, "w") as f:
-        f.write("# Dynamic Redis URLs managed by tunnel_manager.py\n")
-        f.write(f"{redis_url}\n")
+    # Write redis_urls.txt atomically
+    print(f"[*] Re-writing {REDIS_FILE} atomically...")
+    tmp_redis_file = f"{REDIS_FILE}.tmp"
+    try:
+        with open(tmp_redis_file, "w") as f:
+            f.write("# Dynamic Redis URLs managed by tunnel_manager.py\n")
+            f.write(f"{redis_url}\n")
+        os.replace(tmp_redis_file, REDIS_FILE)
+    except Exception as e:
+        print(f"[!] Error atomically renaming {tmp_redis_file}: {e}. Falling back to standard write.")
+        with open(REDIS_FILE, "w") as f:
+            f.write("# Dynamic Redis URLs managed by tunnel_manager.py\n")
+            f.write(f"{redis_url}\n")
         
-    # Write proxies.txt
-    print(f"[*] Re-writing {PROXIES_FILE}...")
-    with open(PROXIES_FILE, "w") as f:
-        f.write("# Dynamic HTTP Proxies managed by tunnel_manager.py and socks_to_http.py\n")
-        f.write(f"{proxy_url}\n")
+    # Write proxies.txt atomically
+    print(f"[*] Re-writing {PROXIES_FILE} atomically...")
+    tmp_proxy_file = f"{PROXIES_FILE}.tmp"
+    try:
+        with open(tmp_proxy_file, "w") as f:
+            f.write("# Dynamic HTTP Proxies managed by tunnel_manager.py and socks_to_http.py\n")
+            f.write(f"{proxy_url}\n")
+        os.replace(tmp_proxy_file, PROXIES_FILE)
+    except Exception as e:
+        print(f"[!] Error atomically renaming {tmp_proxy_file}: {e}. Falling back to standard write.")
+        with open(PROXIES_FILE, "w") as f:
+            f.write("# Dynamic HTTP Proxies managed by tunnel_manager.py and socks_to_http.py\n")
+            f.write(f"{proxy_url}\n")
 
 def reconcile():
     """Main synchronization loop: conforms local tunnels to match the configured CF entry point."""
