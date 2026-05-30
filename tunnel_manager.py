@@ -175,6 +175,32 @@ def spawn_autossh_tunnel(tunnel_type, local_port, hostname, username="ubuntu"):
             time.sleep(0.5)
                 
         print(f"[✓] Verified: Port {local_port} is successfully open and active!")
+        
+        # --- youtube.com SOCKS5 Connectivity Verification Checkpoint ---
+        if tunnel_type == "socks":
+            print(f"[*] Testing SOCKS5 proxy connectivity to youtube.com via port {local_port}...")
+            socks_ok = False
+            for test_attempt in range(1, 11):
+                # We use --socks5-hostname so that DNS resolution happens through the SOCKS5 proxy
+                res = subprocess.run([
+                    "curl", "-s", "-o", "/dev/null",
+                    "-w", "%{http_code}",
+                    "--socks5-hostname", f"localhost:{local_port}",
+                    "https://www.youtube.com",
+                    "--connect-timeout", "5"
+                ], capture_output=True, text=True)
+                
+                http_code = res.stdout.strip()
+                if res.returncode == 0 and http_code in ("200", "301", "302"):
+                    print(f"[✓] SOCKS5 proxy connectivity test succeeded: successfully connected to youtube.com (HTTP {http_code})!")
+                    socks_ok = True
+                    break
+                else:
+                    print(f"[*] Attempt {test_attempt}/10: SOCKS5 youtube.com connectivity check failed (HTTP {http_code}, code {res.returncode}). Retrying in 1s...")
+                    time.sleep(1)
+            
+            if not socks_ok:
+                print(f"[!] Warning: SOCKS5 proxy port {local_port} is bound, but failed to connect to youtube.com after 10 attempts.")
             
     except Exception as e:
         print(f"[!] Failed to spawn {label}: {e}")
