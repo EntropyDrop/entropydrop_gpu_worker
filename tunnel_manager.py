@@ -18,8 +18,6 @@ try:
 except ImportError:
     pass
 
-# Interval to check tunnel status (seconds)
-POLL_INTERVAL = 10
 
 # Base ports (single entry configuration)
 REDIS_PORT = 6380
@@ -238,20 +236,14 @@ def reconcile():
 
 def main():
     print("=" * 80)
-    print("   🚀  CLOUDFLARE AUTOSSH TUNNEL WATCHDOG STARTING (SINGLE ENTRY POINT)")
+    print("   🚀  CLOUDFLARE AUTOSSH TUNNEL SETUP STARTING (SINGLE ENTRY POINT)")
     print("=" * 80)
-    
-    while True:
-        try:
-            reconcile()
-        except Exception as e:
-            print(f"[!] Critical error in watch loop: {e}")
-            
-        time.sleep(POLL_INTERVAL)
+    try:
+        reconcile()
+        print("[✓] Tunnel configuration and startup completed successfully.")
+    except Exception as e:
+        print(f"[!] Critical error during tunnel setup: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n[*] Watchdog stopped.")
-        sys.exit(0)
+    main()
