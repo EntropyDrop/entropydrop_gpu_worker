@@ -159,20 +159,22 @@ def spawn_autossh_tunnel(tunnel_type, local_port, hostname, username="ubuntu"):
         print(f"[✓] Spawned {label} successfully in background.")
         
         # --- Port Occupancy Verification Checkpoint using lsof ---
-        print(f"[*] Verifying port {local_port} binding using lsof...")
-        verified = False
-        for attempt in range(8): # Wait up to 4 seconds (8 * 0.5s)
-            time.sleep(0.5)
+        print(f"[*] Verifying port {local_port} binding using lsof (waiting infinitely)...")
+        attempts = 0
+        while True:
+            attempts += 1
             # Run: lsof -i :<port> to check if the port is occupied
             res = subprocess.run(["lsof", "-i", f":{local_port}"], capture_output=True)
             if res.returncode == 0:
-                verified = True
                 break
+            
+            # Print a progress indicator every 10 attempts (5 seconds)
+            if attempts % 10 == 0:
+                print(f"[*] Still waiting for port {local_port} to bind (elapsed: {attempts * 0.5:.1f}s)...")
                 
-        if verified:
-            print(f"[✓] Verified: Port {local_port} is successfully open and active!")
-        else:
-            raise RuntimeError(f"Port {local_port} failed to bind after spawning autossh. Tunnel connection might have failed.")
+            time.sleep(0.5)
+                
+        print(f"[✓] Verified: Port {local_port} is successfully open and active!")
             
     except Exception as e:
         print(f"[!] Failed to spawn {label}: {e}")
