@@ -10,13 +10,7 @@ import sys
 import time
 import subprocess
 import signal
-
-# Load environment variables from .env
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+from config import settings
 
 
 # Base ports (single entry configuration)
@@ -109,8 +103,8 @@ def kill_process(pid, label):
 
 def spawn_autossh_tunnel(tunnel_type, local_port, hostname, username="ubuntu"):
     """Spawns a background autossh process with optimized configs and cloudflared ProxyCommand."""
-    cf_client_id = os.getenv("CF_ACCESS_CLIENT_ID", "")
-    cf_client_secret = os.getenv("CF_ACCESS_CLIENT_SECRET", "")
+    cf_client_id = settings.CF_ACCESS_CLIENT_ID
+    cf_client_secret = settings.CF_ACCESS_CLIENT_SECRET
 
     common_opts = [
         "autossh", "-M", "0",
@@ -186,7 +180,7 @@ def spawn_autossh_tunnel(tunnel_type, local_port, hostname, username="ubuntu"):
 
 def update_config_files():
     """Writes the active tunnel endpoints into redis_urls.txt and proxies.txt."""
-    redis_password = os.getenv("AWS_REDIS_PASSWORD", "")
+    redis_password = settings.AWS_REDIS_PASSWORD
     
     # Single entry-point endpoints
     redis_url = f"redis://:{redis_password}@127.0.0.1:{REDIS_PORT}/0"
@@ -206,7 +200,7 @@ def update_config_files():
 
 def reconcile():
     """Main synchronization loop: conforms local tunnels to match the configured CF entry point."""
-    cf_hostname = os.getenv("CF_TUNNEL_HOSTNAME", "")
+    cf_hostname = settings.CF_TUNNEL_HOSTNAME
     
     # Scan active system autossh processes
     active_tunnels = get_running_autossh_processes()

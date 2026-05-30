@@ -19,6 +19,14 @@ class WorkerSettings:
     AWS_PRIVATE_BUCKET_NAME: str = os.getenv("AWS_PRIVATE_BUCKET_NAME", "")
     AWS_CDN_DOMAIN: str = os.getenv("AWS_CDN_DOMAIN", "")
 
+    # Redis Password Configuration
+    AWS_REDIS_PASSWORD: str = os.getenv("AWS_REDIS_PASSWORD", "")
+
+    # Cloudflare Tunnel Configuration
+    CF_TUNNEL_HOSTNAME: str = os.getenv("CF_TUNNEL_HOSTNAME", "")
+    CF_ACCESS_CLIENT_ID: str = os.getenv("CF_ACCESS_CLIENT_ID", "")
+    CF_ACCESS_CLIENT_SECRET: str = os.getenv("CF_ACCESS_CLIENT_SECRET", "")
+
     # FLUX / AI Model Directory Settings
     FLUX_MODEL_DIR: str = os.getenv("FLUX_MODEL_DIR", "")
     FLUX_LORA_DIR: str = os.getenv("FLUX_LORA_DIR", "")
