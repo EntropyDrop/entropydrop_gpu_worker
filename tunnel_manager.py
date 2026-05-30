@@ -10,15 +10,21 @@ import sys
 import time
 import subprocess
 import signal
-from discover_jump_hosts import discover_jump_hosts
 
-# Interval to poll AWS (seconds)
-POLL_INTERVAL = 60
+# Load environment variables from .env
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-# Base ports
-REDIS_BASE_PORT = 6380
-SOCKS_BASE_PORT = 9000
-REMOTE_REDIS_PORT = 6379 # The socat binds on 6379 inside the jump host
+# Interval to check tunnel status (seconds)
+POLL_INTERVAL = 10
+
+# Base ports (single entry configuration)
+REDIS_PORT = 6380
+SOCKS_PORT = 9000
+REMOTE_REDIS_PORT = 6379
 
 # Dynamic config files to write
 REDIS_FILE = "redis_urls.txt"
@@ -103,9 +109,11 @@ def kill_process(pid, label):
     except OSError:
         pass
 
-def spawn_autossh_tunnel(tunnel_type, local_port, ip, username="ubuntu"):
-    """Spawns a background autossh process with optimized HA configs."""
-    # Ensure StrictHostKeyChecking=no to bypass container headless confirmation
+def spawn_autossh_tunnel(tunnel_type, local_port, hostname, username="ubuntu"):
+    """Spawns a background autossh process with optimized configs and cloudflared ProxyCommand."""
+    cf_client_id = os.getenv("CF_ACCESS_CLIENT_ID", "")
+    cf_client_secret = os.getenv("CF_ACCESS_CLIENT_SECRET", "")
+
     common_opts = [
         "autossh", "-M", "0",
         "-o", "ServerAliveInterval=10",
@@ -114,35 +122,41 @@ def spawn_autossh_tunnel(tunnel_type, local_port, ip, username="ubuntu"):
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "ConnectTimeout=10"
     ]
-    
+
+    # If Cloudflare service token credentials are configured, use cloudflared ProxyCommand
+    if cf_client_id and cf_client_secret:
+        # Standardize SSH options to use Key=Value format for copy-paste safety
+        proxy_cmd = f"cloudflared access ssh --hostname {hostname} --id {cf_client_id} --secret {cf_client_secret}"
+        common_opts += ["-o", f"ProxyCommand={proxy_cmd}"]
+        print(f"[*] Authenticating to Cloudflare Access with Service Token for {hostname}")
+    else:
+        # Fall back to standard browser-based or unauthenticated cloudflared access proxy
+        proxy_cmd = f"cloudflared access ssh --hostname {hostname}"
+        common_opts += ["-o", f"ProxyCommand={proxy_cmd}"]
+        print(f"[*] Warning: Service Token credentials missing. Falling back to browser-based cloudflared proxy.")
+
     # Dynamically detect if ed-jump-host-key.pem private key exists in the script directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
     key_file = os.path.join(script_dir, "ed-jump-host-key.pem")
     if os.path.exists(key_file):
         common_opts += ["-i", key_file]
         print(f"[*] Found local private key {key_file}, appending -i option.")
-    else:
-        # If not found, SSH automatically falls back to default id_rsa (~/.ssh/id_rsa)
-        # which is populated by entrypoint.sh in the production container!
-        pass
-    
+
     if tunnel_type == "redis":
-        # -f runs autossh in the background, -N disables remote command execution
         cmd = common_opts + [
             "-f", "-N",
             "-L", f"{local_port}:127.0.0.1:{REMOTE_REDIS_PORT}",
-            f"{username}@{ip}"
+            f"{username}@{hostname}"
         ]
-        label = f"Redis Tunnel {local_port} -> {ip}:{REMOTE_REDIS_PORT}"
+        label = f"Redis Tunnel {local_port} -> {hostname}:{REMOTE_REDIS_PORT}"
     else:
-        # SOCKS5 dynamic proxy
         cmd = common_opts + [
             "-D", str(local_port),
             "-f", "-N",
-            f"{username}@{ip}"
+            f"{username}@{hostname}"
         ]
-        label = f"SOCKS Proxy {local_port} -> {ip}"
-        
+        label = f"SOCKS Proxy {local_port} -> {hostname}"
+
     print(f"[*] Launching: {' '.join(cmd)}")
     try:
         # Run with environmental AUTOSSH_GATETIME=0 to guarantee persistent retries
@@ -154,98 +168,77 @@ def spawn_autossh_tunnel(tunnel_type, local_port, ip, username="ubuntu"):
     except Exception as e:
         print(f"[!] Failed to spawn {label}: {e}")
 
-def update_config_files(active_hosts):
+def update_config_files():
     """Writes the active tunnel endpoints into redis_urls.txt and proxies.txt."""
-    redis_urls = []
-    proxies = []
-    
-    # Secure Redis Password lookup from environment
     redis_password = os.getenv("AWS_REDIS_PASSWORD", "")
     
-    for idx in range(len(active_hosts)):
-        redis_port = REDIS_BASE_PORT + idx
-        socks_port = SOCKS_BASE_PORT + idx
-        
-        redis_urls.append(f"redis://:{redis_password}@127.0.0.1:{redis_port}/0")
-        proxies.append(f"socks5h://localhost:{socks_port}")
-        
+    # Single entry-point endpoints
+    redis_url = f"redis://:{redis_password}@127.0.0.1:{REDIS_PORT}/0"
+    proxy_url = f"socks5h://localhost:{SOCKS_PORT}"
+    
     # Write redis_urls.txt
-    print(f"[*] Re-writing {REDIS_FILE} with {len(redis_urls)} active URLs...")
+    print(f"[*] Re-writing {REDIS_FILE}...")
     with open(REDIS_FILE, "w") as f:
         f.write("# Dynamic Redis URLs managed by tunnel_manager.py\n")
-        for url in redis_urls:
-            f.write(f"{url}\n")
-            
+        f.write(f"{redis_url}\n")
+        
     # Write proxies.txt
-    print(f"[*] Re-writing {PROXIES_FILE} with {len(proxies)} active proxies...")
+    print(f"[*] Re-writing {PROXIES_FILE}...")
     with open(PROXIES_FILE, "w") as f:
         f.write("# Dynamic SOCKS5 Proxies managed by tunnel_manager.py\n")
-        for proxy in proxies:
-            f.write(f"{proxy}\n")
+        f.write(f"{proxy_url}\n")
 
 def reconcile():
-    """Main synchronization loop: checks cloud state and conforms local tunnels."""
-    # 1. Fetch current running jump hosts from AWS
-    hosts = discover_jump_hosts()
+    """Main synchronization loop: conforms local tunnels to match the configured CF entry point."""
+    cf_hostname = os.getenv("CF_TUNNEL_HOSTNAME", "")
     
-    # 2. Sort hosts deterministically by Region and Instance ID to guarantee stable indexing
-    hosts.sort(key=lambda h: (h["region"], h["id"]))
-    
-    # 3. Scan active system autossh processes
+    # Scan active system autossh processes
     active_tunnels = get_running_autossh_processes()
     
-    # Keep track of which ports are expected to be running
-    expected_ports = set()
+    # Keep track of expected ports
+    expected_ports = {REDIS_PORT, SOCKS_PORT}
     
-    # 4. Align tunnels for active hosts
-    for idx, host in enumerate(hosts):
-        ip = host["ip"]
-        redis_port = REDIS_BASE_PORT + idx
-        socks_port = SOCKS_BASE_PORT + idx
-        
-        expected_ports.add(redis_port)
-        expected_ports.add(socks_port)
-        
-        # --- Reconcile Redis Tunnel ---
-        if redis_port in active_tunnels:
-            current_tunnel = active_tunnels[redis_port]
-            if current_tunnel["ip"] != ip:
-                print(f"[!] Redis Port {redis_port} IP mismatch (Expected: {ip}, Active: {current_tunnel['ip']})")
-                kill_process(current_tunnel["pid"], f"Redis Tunnel {redis_port}")
-                spawn_autossh_tunnel("redis", redis_port, ip)
-            else:
-                # Active and IP matches, do nothing (keep running)
-                pass
+    # --- Reconcile Redis Tunnel on REDIS_PORT ---
+    if REDIS_PORT in active_tunnels:
+        current_tunnel = active_tunnels[REDIS_PORT]
+        if current_tunnel["ip"] != cf_hostname:
+            print(f"[!] Redis Port {REDIS_PORT} hostname mismatch (Expected: {cf_hostname}, Active: {current_tunnel['ip']})")
+            kill_process(current_tunnel["pid"], f"Redis Tunnel {REDIS_PORT}")
+            spawn_autossh_tunnel("redis", REDIS_PORT, cf_hostname)
         else:
-            # Tunnel not running, spawn it
-            spawn_autossh_tunnel("redis", redis_port, ip)
-            
-        # --- Reconcile SOCKS Tunnel ---
-        if socks_port in active_tunnels:
-            current_tunnel = active_tunnels[socks_port]
-            if current_tunnel["ip"] != ip:
-                print(f"[!] SOCKS Port {socks_port} IP mismatch (Expected: {ip}, Active: {current_tunnel['ip']})")
-                kill_process(current_tunnel["pid"], f"SOCKS Proxy {socks_port}")
-                spawn_autossh_tunnel("socks", socks_port, ip)
-            else:
-                # Active and IP matches, do nothing
-                pass
+            # Active and hostname matches, keep running
+            pass
+    else:
+        # Tunnel not running, spawn it
+        spawn_autossh_tunnel("redis", REDIS_PORT, cf_hostname)
+        
+    # --- Reconcile SOCKS Tunnel on SOCKS_PORT ---
+    if SOCKS_PORT in active_tunnels:
+        current_tunnel = active_tunnels[SOCKS_PORT]
+        if current_tunnel["ip"] != cf_hostname:
+            print(f"[!] SOCKS Port {SOCKS_PORT} hostname mismatch (Expected: {cf_hostname}, Active: {current_tunnel['ip']})")
+            kill_process(current_tunnel["pid"], f"SOCKS Proxy {SOCKS_PORT}")
+            spawn_autossh_tunnel("socks", SOCKS_PORT, cf_hostname)
         else:
-            spawn_autossh_tunnel("socks", socks_port, ip)
-            
-    # 5. Clean up any leftover tunnels beyond the current host count
+            # Active and hostname matches, keep running
+            pass
+    else:
+        # Tunnel not running, spawn it
+        spawn_autossh_tunnel("socks", SOCKS_PORT, cf_hostname)
+        
+    # --- Clean up any leftover tunnels beyond our single entry ports ---
     for local_port, tunnel in active_tunnels.items():
         if local_port not in expected_ports:
             print(f"[!] Cleaning up obsolete tunnel on port {local_port}...")
             kill_process(tunnel["pid"], f"Obsolete Tunnel {local_port}")
             
-    # 6. Update configuration text files for hot-reloading
-    update_config_files(hosts)
+    # Update configuration text files for hot-reloading
+    update_config_files()
     print("[✓] Reconcile sync loop completed successfully.\n")
 
 def main():
     print("=" * 80)
-    print("   🚀  AWS AUTOSSH TUNNEL WATCHDOG STARTING (HA CONTROLLER)")
+    print("   🚀  CLOUDFLARE AUTOSSH TUNNEL WATCHDOG STARTING (SINGLE ENTRY POINT)")
     print("=" * 80)
     
     while True:
