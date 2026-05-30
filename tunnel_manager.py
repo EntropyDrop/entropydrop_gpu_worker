@@ -16,11 +16,29 @@ from config import settings
 # Base ports (single entry configuration)
 REDIS_PORT = 6380
 SOCKS_PORT = 9000
+HTTP_PROXY_PORT = 9100
 REMOTE_REDIS_PORT = 6379
 
 # Dynamic config files to write
 REDIS_FILE = "redis_urls.txt"
 PROXIES_FILE = "proxies.txt"
+
+def get_running_socks_to_http_process():
+    """
+    Parses active system processes to find our socks_to_http.py proxy converter.
+    Returns the PID (int) of the process if running, else None.
+    """
+    try:
+        res = subprocess.run(["ps", "aux"], capture_output=True, text=True, check=True)
+        for line in res.stdout.splitlines():
+            if "socks_to_http.py" in line and "python" in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    return int(parts[1])
+    except Exception as e:
+        print(f"[!] Error scanning running socks_to_http processes: {e}")
+    return None
+
 
 def get_running_autossh_processes():
     """
@@ -212,7 +230,7 @@ def update_config_files():
     
     # Single entry-point endpoints
     redis_url = f"redis://:{redis_password}@127.0.0.1:{REDIS_PORT}/0"
-    proxy_url = f"socks5h://localhost:{SOCKS_PORT}"
+    proxy_url = f"http://127.0.0.1:{HTTP_PROXY_PORT}"
     
     # Write redis_urls.txt
     print(f"[*] Re-writing {REDIS_FILE}...")
@@ -223,7 +241,7 @@ def update_config_files():
     # Write proxies.txt
     print(f"[*] Re-writing {PROXIES_FILE}...")
     with open(PROXIES_FILE, "w") as f:
-        f.write("# Dynamic SOCKS5 Proxies managed by tunnel_manager.py\n")
+        f.write("# Dynamic HTTP Proxies managed by tunnel_manager.py and socks_to_http.py\n")
         f.write(f"{proxy_url}\n")
 
 def reconcile():
@@ -270,6 +288,37 @@ def reconcile():
             print(f"[!] Cleaning up obsolete tunnel on port {local_port}...")
             kill_process(tunnel["pid"], f"Obsolete Tunnel {local_port}")
             
+    # --- Reconcile HTTP-to-SOCKS Proxy ---
+    socks_to_http_pid = get_running_socks_to_http_process()
+    if not socks_to_http_pid:
+        print(f"[*] HTTP-to-SOCKS proxy on port {HTTP_PROXY_PORT} is not running. Spawning it...")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        socks_to_http_script = os.path.join(script_dir, "socks_to_http.py")
+        cmd = [
+            sys.executable,
+            socks_to_http_script,
+            "--port", str(HTTP_PROXY_PORT),
+            "--socks-port", str(SOCKS_PORT)
+        ]
+        try:
+            # Start background daemon process
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            # Port Occupancy Verification Checkpoint using lsof
+            print(f"[*] Verifying HTTP-to-SOCKS proxy port {HTTP_PROXY_PORT} binding...")
+            for verify_attempt in range(20):
+                res = subprocess.run(["lsof", "-i", f":{HTTP_PROXY_PORT}"], capture_output=True)
+                if res.returncode == 0:
+                    print(f"[✓] Verified: HTTP-to-SOCKS proxy is successfully listening on port {HTTP_PROXY_PORT}!")
+                    break
+                time.sleep(0.5)
+            else:
+                print(f"[!] Warning: HTTP-to-SOCKS proxy port {HTTP_PROXY_PORT} is bound or starting, but lsof check failed.")
+        except Exception as e:
+            print(f"[!] Failed to spawn HTTP-to-SOCKS proxy: {e}")
+    else:
+        print(f"[✓] HTTP-to-SOCKS proxy on port {HTTP_PROXY_PORT} is already running (PID: {socks_to_http_pid}).")
+
     # Update configuration text files for hot-reloading
     update_config_files()
     print("[✓] Reconcile sync loop completed successfully.\n")
