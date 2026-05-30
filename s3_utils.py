@@ -1,9 +1,5 @@
 import time
-import socket
-from urllib.parse import urlparse
-
 import boto3
-import urllib3.util.connection
 from botocore.exceptions import ClientError
 from botocore.config import Config
 from config import settings, load_proxies
@@ -12,70 +8,10 @@ from config import settings, load_proxies
 current_proxy_index = 0
 active_s3_client = None
 last_used_proxy = None
-active_proxy_url = None
-
-SOCKS_PROXY_SCHEMES = {"socks", "socks4", "socks4a", "socks5", "socks5h"}
-_orig_create_connection = urllib3.util.connection.create_connection
-
-
-def _is_socks_proxy(proxy_url):
-    return bool(proxy_url and urlparse(proxy_url).scheme.lower() in SOCKS_PROXY_SCHEMES)
-
-
-def _parse_socks_proxy(proxy_url):
-    parsed = urlparse(proxy_url)
-    scheme = parsed.scheme.lower()
-    if scheme in {"socks4", "socks4a"}:
-        proxy_type = "SOCKS4"
-    else:
-        proxy_type = "SOCKS5"
-
-    return {
-        "proxy_type": proxy_type,
-        "host": parsed.hostname or "localhost",
-        "port": parsed.port or 1080,
-        "rdns": scheme in {"socks", "socks4a", "socks5h"},
-        "username": parsed.username,
-        "password": parsed.password,
-    }
-
-
-def patched_create_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, socket_options=None):
-    host, port = address
-
-    if active_proxy_url and _is_socks_proxy(active_proxy_url) and (host == "amazonaws.com" or host.endswith(".amazonaws.com")):
-        import socks
-
-        proxy = _parse_socks_proxy(active_proxy_url)
-        s = socks.socksocket()
-        proxy_type = getattr(socks, proxy["proxy_type"])
-        s.set_proxy(
-            proxy_type,
-            proxy["host"],
-            proxy["port"],
-            rdns=proxy["rdns"],
-            username=proxy["username"],
-            password=proxy["password"],
-        )
-
-        if socket_options:
-            for opt in socket_options:
-                s.setsockopt(*opt)
-        if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT and timeout is not urllib3.util.connection._DEFAULT_TIMEOUT:
-            s.settimeout(timeout)
-        if source_address:
-            s.bind(source_address)
-        s.connect((host, port))
-        return s
-
-    return _orig_create_connection(address, timeout, source_address, socket_options)
-
-
-urllib3.util.connection.create_connection = patched_create_connection
 
 def get_s3_client(force_new=False):
     """Dynamically creates or retrieves the active S3 client configured with the current proxy."""
-    global active_s3_client, current_proxy_index, last_used_proxy, active_proxy_url
+    global active_s3_client, current_proxy_index, last_used_proxy
     
     # Hot-reload proxies list from disk/environment
     proxies_list = load_proxies()
@@ -98,25 +34,18 @@ def get_s3_client(force_new=False):
         'endpoint_url': f"https://s3.{settings.AWS_REGION}.amazonaws.com"
     }
     
-    active_proxy_url = target_proxy if _is_socks_proxy(target_proxy) else None
-
     # Configure proxy if target proxy is active
     if target_proxy:
         print(f"[*] Initializing S3 client using proxy ({current_proxy_index + 1}/{len(proxies_list)}): {target_proxy}")
-        if _is_socks_proxy(target_proxy):
-            # botocore only recognizes http/https proxy URLs and rewrites
-            # socks5h://... as http://socks5h://..., so route SOCKS via PySocks.
-            client_args['config'] = Config(connect_timeout=15, read_timeout=15)
-        else:
-            config = Config(
-                proxies={
-                    'http': target_proxy,
-                    'https': target_proxy
-                },
-                connect_timeout=15,
-                read_timeout=15
-            )
-            client_args['config'] = config
+        config = Config(
+            proxies={
+                'http': target_proxy,
+                'https': target_proxy
+            },
+            connect_timeout=15,
+            read_timeout=15
+        )
+        client_args['config'] = config
     else:
         # Standard configuration with high resilience timeouts
         client_args['config'] = Config(connect_timeout=15, read_timeout=15)
@@ -127,7 +56,7 @@ def get_s3_client(force_new=False):
 
 def execute_s3_with_failover(operation_name, action_func, *args, **kwargs):
     """Executes an S3 request with infinite proxy-rotation failover and direct connection fallback."""
-    global current_proxy_index, active_proxy_url
+    global current_proxy_index
     attempts = 0
     
     while True:
@@ -148,8 +77,6 @@ def execute_s3_with_failover(operation_name, action_func, *args, **kwargs):
             # Try a direct connection check periodically (e.g. after cycling through all proxies)
             if proxies_list and attempts % len(proxies_list) == 0:
                 print("[!] Full proxy cycle completed. Attempting direct S3 connection check...")
-                previous_proxy_url = active_proxy_url
-                active_proxy_url = None
                 try:
                     direct_args = {
                         'service_name': 's3',
@@ -163,8 +90,6 @@ def execute_s3_with_failover(operation_name, action_func, *args, **kwargs):
                     return action_func(direct_client, *args, **kwargs)
                 except Exception as direct_err:
                     print(f"[!] Direct S3 check failed: {direct_err}")
-                finally:
-                    active_proxy_url = previous_proxy_url
             
             # Progressive backoff to avoid hammering
             sleep_time = min(5, attempts)
