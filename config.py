@@ -7,17 +7,23 @@ try:
     dotenv_path = os.getenv("ENV_FILE", ".env")
     if os.path.exists(dotenv_path):
         load_dotenv(dotenv_path)
+    else:
+        print(f"[*] Warning: Environment file '{dotenv_path}' not found. Relying on system environment variables.")
 except ImportError:
-    pass
+    print("[!] Warning: python-dotenv is not installed. Environment variables from .env will not be loaded!")
 
 class WorkerSettings:
     # AWS S3 / CDN Config (Dedicated S3 Keys to avoid clash with EC2 discovery key)
-    AWS_S3_ACCESS_KEY_ID: str = os.getenv("AWS_S3_ACCESS_KEY_ID",  "")
-    AWS_S3_SECRET_ACCESS_KEY: str = os.getenv("AWS_S3_SECRET_ACCESS_KEY",  "")
+    AWS_S3_ACCESS_KEY_ID: str = os.getenv("AWS_S3_ACCESS_KEY_ID", "")
+    AWS_S3_SECRET_ACCESS_KEY: str = os.getenv("AWS_S3_SECRET_ACCESS_KEY", "")
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-2")
     AWS_BUCKET_NAME: str = os.getenv("AWS_BUCKET_NAME", "")
     AWS_PRIVATE_BUCKET_NAME: str = os.getenv("AWS_PRIVATE_BUCKET_NAME", "")
     AWS_CDN_DOMAIN: str = os.getenv("AWS_CDN_DOMAIN", "")
+
+    def __init__(self):
+        if not self.AWS_S3_ACCESS_KEY_ID or not self.AWS_S3_SECRET_ACCESS_KEY:
+            print("[!] CRITICAL WARNING: AWS_S3_ACCESS_KEY_ID or AWS_S3_SECRET_ACCESS_KEY is empty in WorkerSettings!")
 
     # Redis Password Configuration
     AWS_REDIS_PASSWORD: str = os.getenv("AWS_REDIS_PASSWORD", "")
