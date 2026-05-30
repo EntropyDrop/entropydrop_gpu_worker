@@ -12,8 +12,8 @@ except ImportError:
 
 class WorkerSettings:
     # AWS S3 / CDN Config (Dedicated S3 Keys to avoid clash with EC2 discovery key)
-    AWS_S3_ACCESS_KEY_ID: str = os.getenv("AWS_S3_ACCESS_KEY_ID", os.getenv("AWS_ACCESS_KEY_ID", ""))
-    AWS_S3_SECRET_ACCESS_KEY: str = os.getenv("AWS_S3_SECRET_ACCESS_KEY", os.getenv("AWS_SECRET_ACCESS_KEY", ""))
+    AWS_S3_ACCESS_KEY_ID: str = os.getenv("AWS_S3_ACCESS_KEY_ID",  "")
+    AWS_S3_SECRET_ACCESS_KEY: str = os.getenv("AWS_S3_SECRET_ACCESS_KEY",  "")
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-2")
     AWS_BUCKET_NAME: str = os.getenv("AWS_BUCKET_NAME", "")
     AWS_PRIVATE_BUCKET_NAME: str = os.getenv("AWS_PRIVATE_BUCKET_NAME", "")
