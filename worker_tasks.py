@@ -6,7 +6,7 @@ import base64
 from PIL import Image
 import sys
 import os
-from config import settings
+from config import settings, load_redis_urls
 from s3_utils import upload_to_s3, download_from_s3
 from mc_voxel_texture_resolver import resolve_voxel_consistency
 import asyncio
@@ -17,13 +17,32 @@ from rq.job import Job
 from rq.registry import StartedJobRegistry, DeferredJobRegistry, ScheduledJobRegistry
 from diffusers import Flux2KleinPipeline
 import torch
-redis_conn = redis.from_url(
-    settings.REDIS_URL,
-    health_check_interval=10,
-    socket_timeout=60,
-    socket_connect_timeout=60,
-    retry_on_timeout=True
-)
+# Select a working Redis connection dynamically at import time for worker_tasks
+def _init_redis_conn():
+    urls = load_redis_urls()
+    for url in urls:
+        try:
+            conn = redis.from_url(
+                url,
+                health_check_interval=10,
+                socket_timeout=60,
+                socket_connect_timeout=60,
+                retry_on_timeout=True
+            )
+            conn.ping()
+            return conn
+        except Exception:
+            pass
+    # Fallback to first if all fail
+    return redis.from_url(
+        urls[0],
+        health_check_interval=10,
+        socket_timeout=60,
+        socket_connect_timeout=60,
+        retry_on_timeout=True
+    )
+
+redis_conn = _init_redis_conn()
 
 q_t2i = Queue('queue_text_to_image', connection=redis_conn)
 q_edit = Queue('queue_image_edit', connection=redis_conn)

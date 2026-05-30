@@ -32,35 +32,55 @@ sys.stdout = SafeStream(sys.stdout)
 
 from redis import Redis
 from rq import Worker, Queue, SimpleWorker
-from config import settings
+from config import settings, load_redis_urls
 
-# Get central Redis URL (read from configuration/environment variables)
-REDIS_URL = settings.REDIS_URL
+current_redis_index = 0
+
+def get_next_redis_connection():
+    global current_redis_index
+    attempts = 0
+    while True:
+        # Hot-reload the URLs list dynamically from disk
+        urls_list = load_redis_urls()
+        
+        # Guard index in case list size changed dynamically
+        current_redis_index = current_redis_index % len(urls_list)
+        url = urls_list[current_redis_index]
+        
+        print(f"[*] Attempting to connect to Redis URL ({current_redis_index + 1}/{len(urls_list)}): {url}")
+        try:
+            conn = Redis.from_url(url, health_check_interval=10, retry_on_timeout=True)
+            conn.ping()
+            print(f"[✓] Successfully connected to Redis!")
+            return conn, url
+        except Exception as e:
+            attempts += 1
+            print(f"[!] Failed to connect to Redis at {url}: {e}")
+            current_redis_index = (current_redis_index + 1) % len(urls_list)
+            
+            # Backoff sleep to avoid Hammering CPU during long outages
+            sleep_time = min(5, attempts)
+            print(f"  [*] Retrying Redis connection loop in {sleep_time}s...")
+            time.sleep(sleep_time)
 
 # Bind to a specific GPU (e.g., "0" to use the first card).
-# Can also be set before the startup command: CUDA_VISIBLE_DEVICES=0 python run_worker.py
 GPU_ID = os.getenv("CUDA_VISIBLE_DEVICES", "0")
 WORKER_RESTART_DELAY_SECONDS = int(os.getenv("WORKER_RESTART_DELAY_SECONDS", "5"))
 
 print(f"[*] Starting GPU Worker binding to GPU: {GPU_ID}")
-print(f"[*] Connecting to Redis: {REDIS_URL}")
+print(f"[*] Configuring Redis Cluster lists: Prioritizing redis_urls.txt file.")
 
 # Read queues to listen to from command-line arguments. If no arguments are provided, listen to all queues by default!
 requested_queues = sys.argv[1:] if len(sys.argv) > 1 else ['queue_text_to_image', 'queue_image_edit', 'queue_image_to_skin']
 
 # Add a high-priority version (prefixed with high_) for each queue.
-# RQ processes queues in list order, so we place all high-priority queues first.
 listen = [f"high_{q}" for q in requested_queues] + requested_queues
 
 print(f"[*] Listening on queues: {listen}")
 
-# Establish Redis connection.
-# Include health_check_interval and retry_on_timeout to prevent Broken pipe errors caused by SSH tunnel disconnection or idle timeouts.
-conn = Redis.from_url(REDIS_URL, health_check_interval=10, retry_on_timeout=True)
-
 def run_worker():
+    global current_redis_index
     worker_cls = Worker
-    # Force the use of SimpleWorker if listening to any queue that requires a GPU to prevent CUDA re-initialization and model reloading caused by fork()
     gpu_queues = ['queue_text_to_image', 'queue_image_edit', 'queue_image_to_skin']
     if any(q in listen for q in gpu_queues) or any(f"high_{q}" in listen for q in gpu_queues):
         import worker_tasks
@@ -81,19 +101,31 @@ def run_worker():
         worker_cls = SimpleWorker
 
     while True:
-        # Recreate the Worker object after any unexpected work-loop exit so
-        # transient Redis/socket failures do not leave the process idle forever.
+        # 1. Get a working Redis connection dynamically
+        conn, active_url = get_next_redis_connection()
+        
+        # 2. Update the import-time connection in worker_tasks to match our active connection dynamically
+        try:
+            import worker_tasks
+            worker_tasks.redis_conn = conn
+        except Exception as e:
+            print(f"[!] Warning syncing connection to worker_tasks: {e}")
+            
         queues = [Queue(name, connection=conn) for name in listen]
         worker = worker_cls(queues, connection=conn)
 
         try:
+            print(f"[*] Worker starting work loop on: {active_url}")
             worker.work(with_scheduler=True)
         except KeyboardInterrupt:
             raise
         except Exception as exc:
-            print(f"[!] Worker loop crashed: {exc}")
+            print(f"[!] Worker loop crashed on {active_url}: {exc}")
 
-        print(f"[*] Worker loop exited. Restarting in {WORKER_RESTART_DELAY_SECONDS}s...")
+        # Cycle to the next connection on exit to try another host if this crashed
+        urls_list = load_redis_urls()
+        current_redis_index = (current_redis_index + 1) % len(urls_list)
+        print(f"[*] Worker loop exited. Reconnecting in {WORKER_RESTART_DELAY_SECONDS}s...")
         time.sleep(WORKER_RESTART_DELAY_SECONDS)
 
 if __name__ == '__main__':

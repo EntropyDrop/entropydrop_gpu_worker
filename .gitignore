@@ -84,3 +84,5 @@ dmypy.json
 .ruff_cache/
 
 entrypoint.sh
+proxies.txt
+redis_urls.txt
