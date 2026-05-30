@@ -162,9 +162,27 @@ def spawn_autossh_tunnel(tunnel_type, local_port, hostname, username="ubuntu"):
         env["AUTOSSH_GATETIME"] = "0"
         
         subprocess.run(cmd, env=env, check=True)
-        print(f"[✓] Spawned {label} successfully!")
+        print(f"[✓] Spawned {label} successfully in background.")
+        
+        # --- Port Occupancy Verification Checkpoint using lsof ---
+        print(f"[*] Verifying port {local_port} binding using lsof...")
+        verified = False
+        for attempt in range(8): # Wait up to 4 seconds (8 * 0.5s)
+            time.sleep(0.5)
+            # Run: lsof -i :<port> to check if the port is occupied
+            res = subprocess.run(["lsof", "-i", f":{local_port}"], capture_output=True)
+            if res.returncode == 0:
+                verified = True
+                break
+                
+        if verified:
+            print(f"[✓] Verified: Port {local_port} is successfully open and active!")
+        else:
+            raise RuntimeError(f"Port {local_port} failed to bind after spawning autossh. Tunnel connection might have failed.")
+            
     except Exception as e:
         print(f"[!] Failed to spawn {label}: {e}")
+        raise
 
 def update_config_files():
     """Writes the active tunnel endpoints into redis_urls.txt and proxies.txt."""
