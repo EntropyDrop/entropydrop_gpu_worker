@@ -10,6 +10,7 @@ import sys
 import time
 import subprocess
 import signal
+import socket
 from config import settings
 
 
@@ -38,6 +39,64 @@ def get_running_socks_to_http_process():
     except Exception as e:
         print(f"[!] Error scanning running socks_to_http processes: {e}")
     return None
+
+
+def test_redis_availability(port):
+    """
+    Tests if Redis port is open and responding.
+    Returns (is_alive: bool, message: str)
+    """
+    # 1. First check if port is occupied using lsof
+    res = subprocess.run(["lsof", "-i", f":{port}"], capture_output=True)
+    if res.returncode != 0:
+        return False, "Port is not occupied"
+        
+    # 2. Try socket connection and sending PING
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect(("127.0.0.1", port))
+        
+        # Send raw Redis PING command
+        s.sendall(b"*1\r\n$4\r\nPING\r\n")
+        resp = s.recv(1024)
+        s.close()
+        
+        if b"PONG" in resp or b"NOAUTH" in resp or b"ERR" in resp:
+            return True, "Redis connection and PING handshake succeeded"
+        else:
+            return False, f"Unexpected Redis response: {resp.decode('utf-8', errors='ignore').strip()}"
+    except Exception as e:
+        return False, f"Socket connection failed: {e}"
+
+
+def test_proxy_availability(port):
+    """
+    Tests if the HTTP proxy on port is open and can access youtube.com.
+    Returns (is_alive: bool, message: str)
+    """
+    # 1. First check if port is occupied using lsof
+    res = subprocess.run(["lsof", "-i", f":{port}"], capture_output=True)
+    if res.returncode != 0:
+        return False, "Port is not occupied"
+        
+    # 2. Try accessing youtube.com through the HTTP proxy
+    try:
+        res = subprocess.run([
+            "curl", "-s", "-o", "/dev/null",
+            "-w", "%{http_code}",
+            "--proxy", f"http://127.0.0.1:{port}",
+            "https://www.youtube.com",
+            "--connect-timeout", "5"
+        ], capture_output=True, text=True)
+        
+        http_code = res.stdout.strip()
+        if res.returncode == 0 and http_code in ("200", "301", "302"):
+            return True, f"Can successfully access youtube.com via HTTP proxy (HTTP {http_code})"
+        else:
+            return False, f"youtube.com check failed (HTTP {http_code}, curl exit code {res.returncode})"
+    except Exception as e:
+        return False, f"Proxy curl execution failed: {e}"
 
 
 def get_running_autossh_processes():
@@ -255,43 +314,67 @@ def reconcile():
     expected_ports = {REDIS_PORT, SOCKS_PORT}
     
     # --- Reconcile Redis Tunnel on REDIS_PORT ---
+    redis_alive = False
     if REDIS_PORT in active_tunnels:
         current_tunnel = active_tunnels[REDIS_PORT]
         if current_tunnel["ip"] != cf_hostname:
             print(f"[!] Redis Port {REDIS_PORT} hostname mismatch (Expected: {cf_hostname}, Active: {current_tunnel['ip']})")
             kill_process(current_tunnel["pid"], f"Redis Tunnel {REDIS_PORT}")
-            spawn_autossh_tunnel("redis", REDIS_PORT, cf_hostname)
         else:
-            # Active and hostname matches, keep running
-            pass
-    else:
-        # Tunnel not running, spawn it
+            # Test actual Redis responsiveness
+            alive, msg = test_redis_availability(REDIS_PORT)
+            if alive:
+                print(f"[✓] Redis on port {REDIS_PORT} is responsive: {msg}")
+                redis_alive = True
+            else:
+                print(f"[!] Redis connectivity check failed on port {REDIS_PORT}: {msg}. Recreating Redis tunnel...")
+                kill_process(current_tunnel["pid"], f"Unresponsive Redis Tunnel {REDIS_PORT}")
+
+    if not redis_alive:
         spawn_autossh_tunnel("redis", REDIS_PORT, cf_hostname)
         
-    # --- Reconcile SOCKS Tunnel on SOCKS_PORT ---
-    if SOCKS_PORT in active_tunnels:
+    # --- Reconcile SOCKS Tunnel and HTTP Proxy ---
+    socks_alive = False
+    socks_to_http_pid = get_running_socks_to_http_process()
+    
+    if SOCKS_PORT in active_tunnels and socks_to_http_pid:
         current_tunnel = active_tunnels[SOCKS_PORT]
         if current_tunnel["ip"] != cf_hostname:
             print(f"[!] SOCKS Port {SOCKS_PORT} hostname mismatch (Expected: {cf_hostname}, Active: {current_tunnel['ip']})")
             kill_process(current_tunnel["pid"], f"SOCKS Proxy {SOCKS_PORT}")
-            spawn_autossh_tunnel("socks", SOCKS_PORT, cf_hostname)
+            kill_process(socks_to_http_pid, "socks_to_http proxy")
+            socks_to_http_pid = None
         else:
-            # Active and hostname matches, keep running
-            pass
+            # Test actual end-to-end HTTP proxy connectivity to youtube.com
+            alive, msg = test_proxy_availability(HTTP_PROXY_PORT)
+            if alive:
+                print(f"[✓] HTTP Proxy on port {HTTP_PROXY_PORT} is responsive: {msg}")
+                socks_alive = True
+            else:
+                print(f"[!] Proxy connectivity check failed on port {HTTP_PROXY_PORT}: {msg}. Recreating proxy setup...")
+                kill_process(current_tunnel["pid"], f"SOCKS Proxy {SOCKS_PORT}")
+                kill_process(socks_to_http_pid, "socks_to_http proxy")
+                socks_to_http_pid = None
     else:
-        # Tunnel not running, spawn it
-        spawn_autossh_tunnel("socks", SOCKS_PORT, cf_hostname)
-        
+        # If one is missing, clean up both to start fresh
+        if SOCKS_PORT in active_tunnels:
+            kill_process(active_tunnels[SOCKS_PORT]["pid"], f"SOCKS Proxy {SOCKS_PORT}")
+        if socks_to_http_pid:
+            kill_process(socks_to_http_pid, "socks_to_http proxy")
+            socks_to_http_pid = None
+            
     # --- Clean up any leftover tunnels beyond our single entry ports ---
     for local_port, tunnel in active_tunnels.items():
         if local_port not in expected_ports:
             print(f"[!] Cleaning up obsolete tunnel on port {local_port}...")
             kill_process(tunnel["pid"], f"Obsolete Tunnel {local_port}")
             
-    # --- Reconcile HTTP-to-SOCKS Proxy ---
-    socks_to_http_pid = get_running_socks_to_http_process()
-    if not socks_to_http_pid:
-        print(f"[*] HTTP-to-SOCKS proxy on port {HTTP_PROXY_PORT} is not running. Spawning it...")
+    if not socks_alive:
+        # Spawn SOCKS tunnel
+        spawn_autossh_tunnel("socks", SOCKS_PORT, cf_hostname)
+        
+        # Spawn HTTP-to-SOCKS proxy
+        print(f"[*] Spawning HTTP-to-SOCKS proxy on port {HTTP_PROXY_PORT}...")
         script_dir = os.path.dirname(os.path.abspath(__file__))
         socks_to_http_script = os.path.join(script_dir, "socks_to_http.py")
         cmd = [
