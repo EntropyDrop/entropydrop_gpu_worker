@@ -281,7 +281,7 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
             
         # upload intermediate
         s3id_result = log_id
-        intermediate_filename = f"edited/{s3id_result}.jpg"
+        intermediate_filename = f"text_to_image_intermediate/{s3id_result}.jpg"
         
         t_up_start = time.time()
         upload_to_s3(img_data, intermediate_filename, is_public, "image/jpeg")
@@ -363,7 +363,7 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
         img_data = img_io.getvalue()
             
         s3id_result = log_id
-        intermediate_filename = f"edited/{s3id_result}.jpg"
+        intermediate_filename = f"image_edit/{s3id_result}.jpg"
         
         t_up_start = time.time()
         upload_to_s3(img_data, intermediate_filename, is_public, "image/jpeg")
