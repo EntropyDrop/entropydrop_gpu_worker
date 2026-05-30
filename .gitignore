@@ -86,3 +86,4 @@ dmypy.json
 entrypoint.sh
 proxies.txt
 redis_urls.txt
+*.pem.pub
