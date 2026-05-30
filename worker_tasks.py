@@ -280,7 +280,7 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
         img_data = img_io.getvalue()
             
         # upload intermediate
-        s3id_result = uuid.uuid4().hex
+        s3id_result = log_id
         intermediate_filename = f"edited/{s3id_result}.jpg"
         
         t_up_start = time.time()
@@ -362,7 +362,7 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
         images[0].convert("RGB").save(img_io, format="JPEG", quality=95)
         img_data = img_io.getvalue()
             
-        s3id_result = uuid.uuid4().hex
+        s3id_result = log_id
         intermediate_filename = f"edited/{s3id_result}.jpg"
         
         t_up_start = time.time()
@@ -468,7 +468,7 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
         img_data = img_io.getvalue()
 
         # Post process
-        s3id_result = uuid.uuid4().hex
+        s3id_result = log_id
         
         t_post_start = time.time()
         final_filename = process_and_upload_final_skin(img_data, s3id_result, is_public)
