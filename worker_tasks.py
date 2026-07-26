@@ -201,7 +201,7 @@ def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filena
         "worker_tasks.task_image_to_skin",
         args=(log_id, is_public, intermediate_filename, "image/jpeg", prompt),
         kwargs={"intermediate_filename": intermediate_filename, "guidance": guidance, "model_version": model_version, "aux_model_version": aux_model_version, "seed": seed, "n_step": n_step},
-        job_timeout='130s',
+        job_timeout='400s',
         retry=retry_policy,
         result_ttl=10,
         job_id=job_id
