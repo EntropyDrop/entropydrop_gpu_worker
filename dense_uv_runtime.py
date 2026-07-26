@@ -73,8 +73,8 @@ class DenseUVInferenceRuntime:
             self.parser_args.get(
                 "views",
                 (
-                    "walk_front_both_layer_ortho,"
-                    "walk_back_both_layer_ortho"
+                    "front_left,"
+                    "back_left"
                 ),
             )
         )
@@ -186,7 +186,7 @@ class DenseUVInferenceRuntime:
                 outer_route_confidence_threshold=0.80,
                 outer_route_margin_threshold=0.55,
                 outer_uv_min_coverage=0.25,
-                outer_uv_min_source_pixels=30,
+                outer_uv_min_source_pixels=40,
                 outer_geometry_rescue=True,
                 outer_semantic_rescue=True,
                 outer_semantic_presence_threshold=0.80,
