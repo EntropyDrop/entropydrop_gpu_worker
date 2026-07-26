@@ -189,7 +189,7 @@ def get_job_intermediate_filename(job, fallback: str) -> str:
     return fallback
 
 
-def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filename: str, prompt: str, guidance: float, model_version: str, seed: int, n_step: int, queue_prefix: str):
+def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filename: str, prompt: str, guidance: float, model_version: str, aux_model_version: str, seed: int, n_step: int, queue_prefix: str):
     target_q_skin = Queue(f"{queue_prefix}queue_image_to_skin", connection=redis_conn)
     job_id = make_generation_job_id(log_id, "image_to_skin")
     active_job = fetch_active_job(target_q_skin, job_id)
@@ -200,7 +200,7 @@ def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filena
     job = target_q_skin.enqueue(
         "worker_tasks.task_image_to_skin",
         args=(log_id, is_public, intermediate_filename, "image/jpeg", prompt),
-        kwargs={"intermediate_filename": intermediate_filename, "guidance": guidance, "model_version": model_version, "seed": seed, "n_step": n_step},
+        kwargs={"intermediate_filename": intermediate_filename, "guidance": guidance, "model_version": model_version, "aux_model_version": aux_model_version, "seed": seed, "n_step": n_step},
         job_timeout='130s',
         retry=retry_policy,
         result_ttl=10,
@@ -242,7 +242,7 @@ def process_and_upload_final_skin(img_data_bytes: bytes, s3id_result: str, is_pu
     print(f"[*] Crop/Format: {t_bg - t_start:.2f}s, RemoveBG: {t_voxel - t_bg:.2f}s, Voxel: {t_post - t_voxel:.2f}s, S3 Upload: {t_end - t_up:.2f}s, Total post-process: {t_end - t_start:.2f}s")
     return filename
 
-async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, model_version: str, seed: int, n_step: int, guidance: float):
+async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, model_version: str, aux_model_version: str = None, seed: int = None, n_step: int = None, guidance: float = None):
     try:
         report_status(log_id, "processing", stage="text_to_image")
         
@@ -300,6 +300,7 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
             prompt,
             guidance,
             model_version,
+            aux_model_version,
             seed,
             n_step,
             prefix,
@@ -320,7 +321,7 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
         report_status(log_id, "failed", error_msg=f"{str(e)}\n\n{err_detail}", stage="text_to_image")
         raise e
 
-async def task_image_edit_async(log_id: str, is_public: bool, source: str, content_type: str, prompt: str, model_version: str, seed: int, n_step: int, guidance: float):
+async def task_image_edit_async(log_id: str, is_public: bool, source: str, content_type: str, prompt: str, model_version: str, aux_model_version: str = None, seed: int = None, n_step: int = None, guidance: float = None):
     try:
         report_status(log_id, "processing", stage="image_edit")
         
@@ -382,6 +383,7 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
             prompt,
             guidance,
             model_version,
+            aux_model_version,
             seed,
             n_step,
             prefix,
@@ -402,7 +404,7 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
         report_status(log_id, "failed", error_msg=f"{str(e)}\n\n{err_detail}", stage="image_edit")
         raise e
 
-async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, content_type: str, prompt: str, model_version: str = None, seed: int = None, n_step: int = None, guidance: float = None, intermediate_filename: str = None):
+async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, content_type: str, prompt: str, model_version: str = None, aux_model_version: str = None, seed: int = None, n_step: int = None, guidance: float = None, intermediate_filename: str = None):
     try:
         report_status(log_id, "processing_skin", stage="image_to_skin")
         
@@ -417,8 +419,7 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
             init_img_to_skin_pipeline()
         
         # Dynamic LoRA loading based on model_version
-        # Extract everything from the last space of model_version to the end
-        requested_lora = model_version.split(" ")[-1] + '.safetensors'
+        requested_lora = model_version + '.safetensors'
         if current_lora_name != requested_lora:
             print(f"[*] Switching LoRA: {current_lora_name} -> {requested_lora}")
             lora_dir = settings.FLUX_LORA_DIR
