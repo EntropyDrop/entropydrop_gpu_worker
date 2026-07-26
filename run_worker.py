@@ -70,8 +70,26 @@ WORKER_RESTART_DELAY_SECONDS = int(os.getenv("WORKER_RESTART_DELAY_SECONDS", "5"
 print(f"[*] Starting GPU Worker binding to GPU: {GPU_ID}")
 print(f"[*] Configuring Redis Cluster lists: Prioritizing redis_urls.txt file.")
 
-# Read queues to listen to from command-line arguments. If no arguments are provided, listen to all queues by default!
-requested_queues = sys.argv[1:] if len(sys.argv) > 1 else ['queue_text_to_image', 'queue_image_edit', 'queue_image_to_skin']
+# Read queues from command-line arguments. A deployment may set one default
+# queue through GPU_WORKER_QUEUE; otherwise preserve the legacy defaults.
+configured_queue = os.getenv("GPU_WORKER_QUEUE", "").strip()
+if len(sys.argv) > 1:
+    requested_queues = sys.argv[1:]
+elif configured_queue:
+    requested_queues = [configured_queue]
+else:
+    requested_queues = [
+        'queue_text_to_image',
+        'queue_image_edit',
+        'queue_image_to_skin',
+    ]
+if (
+    "queue_render_to_uv" in requested_queues
+    and len(requested_queues) != 1
+):
+    raise RuntimeError(
+        "queue_render_to_uv must run in its own GPU worker process"
+    )
 
 # Add a high-priority version (prefixed with high_) for each queue.
 listen = [f"high_{q}" for q in requested_queues] + requested_queues
@@ -81,7 +99,12 @@ print(f"[*] Listening on queues: {listen}")
 def run_worker():
     global current_redis_index
     worker_cls = Worker
-    gpu_queues = ['queue_text_to_image', 'queue_image_edit', 'queue_image_to_skin']
+    gpu_queues = [
+        'queue_text_to_image',
+        'queue_image_edit',
+        'queue_image_to_skin',
+        'queue_render_to_uv',
+    ]
     if any(q in listen for q in gpu_queues) or any(f"high_{q}" in listen for q in gpu_queues):
         import worker_tasks
         
@@ -96,6 +119,10 @@ def run_worker():
         if 'queue_image_to_skin' in listen or 'high_queue_image_to_skin' in listen:
             print("[*] Pre-loading Flux2KleinPipeline for image_to_skin tasks...")
             worker_tasks.init_img_to_skin_pipeline()
+
+        if 'queue_render_to_uv' in listen or 'high_queue_render_to_uv' in listen:
+            print("[*] Pre-loading Dense UV pipeline for render_to_uv tasks...")
+            worker_tasks.init_dense_uv_pipeline()
             
         print("[*] All requested models loaded. Using SimpleWorker to maintain GPU memory.")
         worker_cls = SimpleWorker

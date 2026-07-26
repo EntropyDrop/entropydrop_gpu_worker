@@ -63,9 +63,31 @@ img_to_skin_pipe = None
 img_edit_pipe = None
 text_to_img_pipe = None
 skin_gen_prompt_embeds = None
+dense_uv_pipe = None
 
 # Track currently loaded LoRA for img_to_skin_pipe
 current_lora_name = None
+
+
+def init_dense_uv_pipeline():
+    global dense_uv_pipe
+    if dense_uv_pipe is not None:
+        return dense_uv_pipe
+
+    from dense_uv_runtime import DenseUVInferenceRuntime
+
+    print(
+        "[*] Loading Dense UV pipeline "
+        f"from {settings.DENSE_UV_CHECKPOINT_PATH}..."
+    )
+    dense_uv_pipe = DenseUVInferenceRuntime(
+        toolkit_root=settings.SKING_TOOLKIT_ROOT,
+        checkpoint_path=settings.DENSE_UV_CHECKPOINT_PATH,
+        mappings_dir=settings.DENSE_UV_MAPPINGS_DIR,
+        device=settings.DENSE_UV_DEVICE,
+    )
+    print("[*] Dense UV checkpoint, SigLIP2, and mappings loaded.")
+    return dense_uv_pipe
 
 def init_text_to_img_pipeline():
     global text_to_img_pipe
@@ -217,7 +239,7 @@ def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filena
     return job, True
 
 
-def report_status(log_id: str, status: str, result: str = None, edited_result: str = None, error_msg: str = None, source: str = None, stage: str = None):
+def report_status(log_id: str, status: str, result: str = None, edited_result: str = None, error_msg: str = None, source: str = None, stage: str = None, pipeline_version: str = None):
     """Push status report to Redis"""
     payload = {"log_id": log_id, "status": status}
     if result is not None: payload["result"] = result
@@ -225,6 +247,7 @@ def report_status(log_id: str, status: str, result: str = None, edited_result: s
     if error_msg is not None: payload["error_msg"] = error_msg
     if source is not None: payload["source"] = source
     if stage is not None: payload["stage"] = stage
+    if pipeline_version is not None: payload["pipeline_version"] = pipeline_version
     redis_conn.lpush(RESULT_QUEUE_KEY, json.dumps(payload))
 
 def process_and_upload_final_skin(img_data_bytes: bytes, s3id_result: str, is_public: bool) -> str:
@@ -500,3 +523,60 @@ def task_image_edit(*args, **kwargs):
 
 def task_image_to_skin(*args, **kwargs):
     asyncio.run(task_image_to_skin_async(*args, **kwargs))
+
+
+def task_render_to_uv(
+    log_id: str,
+    is_public: bool,
+    source: str,
+    content_type: str,
+    pipeline_version: str,
+):
+    del content_type
+    try:
+        if pipeline_version != settings.DENSE_UV_PIPELINE_VERSION:
+            raise ValueError(
+                "Dense UV pipeline version mismatch: "
+                f"task={pipeline_version!r}, "
+                f"worker={settings.DENSE_UV_PIPELINE_VERSION!r}"
+            )
+
+        report_status(
+            log_id,
+            "processing_skin",
+            stage="render_to_uv",
+            pipeline_version=pipeline_version,
+        )
+        combined_render = download_from_s3(source, is_public)
+        skin_png = init_dense_uv_pipeline().infer_png(combined_render)
+        final_filename = f"generations/{log_id}.png"
+        upload_to_s3(
+            skin_png,
+            final_filename,
+            is_public,
+            "image/png",
+        )
+        report_status(
+            log_id,
+            "success",
+            result=final_filename,
+            edited_result=source,
+            stage="render_to_uv",
+            pipeline_version=pipeline_version,
+        )
+    except Exception as exc:
+        import traceback
+
+        error_detail = traceback.format_exc()
+        print(
+            f"[{log_id}] Dense UV task failed with exception:\n"
+            f"{error_detail}"
+        )
+        report_status(
+            log_id,
+            "failed",
+            error_msg=f"{exc}\n\n{error_detail}",
+            stage="render_to_uv",
+            pipeline_version=pipeline_version,
+        )
+        raise

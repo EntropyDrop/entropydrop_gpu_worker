@@ -39,7 +39,20 @@ class WorkerSettings:
     ZIMAGE_MODEL_DIR: str = os.getenv("ZIMAGE_MODEL_DIR", "")
     DENSE_UV_CHECKPOINT_PATH: str = os.getenv(
         "DENSE_UV_CHECKPOINT_PATH",
-        "",
+        "/root/Sking/SKING_DDJ_v54.pt",
+    )
+    SKING_TOOLKIT_ROOT: str = os.getenv(
+        "SKING_TOOLKIT_ROOT",
+        "/root/SkingToolkit",
+    )
+    DENSE_UV_MAPPINGS_DIR: str = os.getenv(
+        "DENSE_UV_MAPPINGS_DIR",
+        "/root/differentiable_minecraft_renderer/mappings_256x512",
+    )
+    DENSE_UV_DEVICE: str = os.getenv("DENSE_UV_DEVICE", "cuda")
+    DENSE_UV_PIPELINE_VERSION: str = os.getenv(
+        "DENSE_UV_PIPELINE_VERSION",
+        "real2render-t41-t51-t52-sking-ddj-v54-v1",
     )
 
 settings = WorkerSettings()
