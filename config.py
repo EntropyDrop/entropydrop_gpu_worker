@@ -37,6 +37,10 @@ class WorkerSettings:
     FLUX_MODEL_DIR: str = os.getenv("FLUX_MODEL_DIR", "")
     FLUX_LORA_DIR: str = os.getenv("FLUX_LORA_DIR", "")
     ZIMAGE_MODEL_DIR: str = os.getenv("ZIMAGE_MODEL_DIR", "")
+    DENSE_UV_CHECKPOINT_PATH: str = os.getenv(
+        "DENSE_UV_CHECKPOINT_PATH",
+        "",
+    )
 
 settings = WorkerSettings()
 
@@ -105,4 +109,3 @@ def load_proxies():
             
     # Default fallback when file is not set or empty (no proxies)
     return []
-

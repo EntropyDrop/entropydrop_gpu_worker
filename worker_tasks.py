@@ -49,6 +49,14 @@ q_edit = Queue('queue_image_edit', connection=redis_conn)
 q_skin = Queue('queue_image_to_skin', connection=redis_conn)
 retry_policy = Retry(max=99999, interval=[5, 10, 30, 60])
 RESULT_QUEUE_KEY = os.getenv("GENERATE_RESULT_QUEUE_KEY", "generate_results")
+RECOVERABLE_MODEL_VERSIONS = {
+    version.strip()
+    for version in os.getenv(
+        "RECOVERABLE_MODEL_VERSIONS",
+        "sking_v73_flux_4b_000027000",
+    ).split(",")
+    if version.strip()
+}
 
 # Pipeline variable initialized by run_worker.py
 img_to_skin_pipe = None
@@ -202,7 +210,7 @@ def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filena
         args=(log_id, is_public, intermediate_filename, "image/jpeg", prompt),
         kwargs={"intermediate_filename": intermediate_filename, "guidance": guidance, "model_version": model_version, "aux_model_version": aux_model_version, "seed": seed, "n_step": n_step},
         job_timeout='400s',
-        retry=retry_policy,
+        retry=retry_policy if model_version in RECOVERABLE_MODEL_VERSIONS else None,
         result_ttl=10,
         job_id=job_id
     )
