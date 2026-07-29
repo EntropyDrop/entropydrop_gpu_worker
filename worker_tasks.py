@@ -48,6 +48,10 @@ q_t2i = Queue('queue_text_to_image', connection=redis_conn)
 q_edit = Queue('queue_image_edit', connection=redis_conn)
 q_skin = Queue('queue_image_to_skin', connection=redis_conn)
 retry_policy = Retry(max=99999, interval=[5, 10, 30, 60])
+# S3 operations have their own infinite failover/retry loop. Disabling RQ's
+# overall timeout keeps the current image_to_skin job running until S3
+# recovers instead of letting the worker move on to the next queued job.
+IMAGE_TO_SKIN_JOB_TIMEOUT = -1
 RESULT_QUEUE_KEY = os.getenv("GENERATE_RESULT_QUEUE_KEY", "generate_results")
 RECOVERABLE_MODEL_VERSIONS = {
     version.strip()
@@ -231,7 +235,7 @@ def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filena
         "worker_tasks.task_image_to_skin",
         args=(log_id, is_public, intermediate_filename, "image/jpeg", prompt),
         kwargs={"intermediate_filename": intermediate_filename, "guidance": guidance, "model_version": model_version, "aux_model_version": aux_model_version, "seed": seed, "n_step": n_step},
-        job_timeout='400s',
+        job_timeout=IMAGE_TO_SKIN_JOB_TIMEOUT,
         retry=retry_policy if model_version in RECOVERABLE_MODEL_VERSIONS else None,
         result_ttl=10,
         job_id=job_id
