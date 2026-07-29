@@ -4,6 +4,39 @@ from botocore.exceptions import ClientError
 from botocore.config import Config
 from config import settings, load_proxies
 
+
+class S3ObjectNotFoundError(FileNotFoundError):
+    """The requested S3 object is permanently absent."""
+
+
+class S3OperationAbortedError(RuntimeError):
+    """The caller no longer needs the S3 operation to finish."""
+
+
+S3_NOT_FOUND_ERROR_CODES = {
+    "404",
+    "NoSuchKey",
+    "NoSuchObject",
+    "NotFound",
+}
+
+
+def is_s3_object_not_found(error):
+    if not isinstance(error, ClientError):
+        return False
+    response = getattr(error, "response", {}) or {}
+    error_code = str(response.get("Error", {}).get("Code", ""))
+    http_status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return error_code in S3_NOT_FOUND_ERROR_CODES or http_status == 404
+
+
+def raise_if_s3_operation_aborted(operation_name, abort_if):
+    if abort_if is not None and abort_if():
+        raise S3OperationAbortedError(
+            f"S3 operation '{operation_name}' was cancelled"
+        )
+
+
 # Dynamic proxy tracking variables
 current_proxy_index = 0
 active_s3_client = None
@@ -54,19 +87,35 @@ def get_s3_client(force_new=False):
     last_used_proxy = target_proxy
     return active_s3_client
 
-def execute_s3_with_failover(operation_name, action_func, *args, **kwargs):
+def execute_s3_with_failover(
+    operation_name,
+    action_func,
+    *args,
+    abort_if=None,
+    **kwargs,
+):
     """Executes an S3 request with infinite proxy-rotation failover and direct connection fallback."""
     global current_proxy_index
     attempts = 0
     
     while True:
+        raise_if_s3_operation_aborted(operation_name, abort_if)
         client = get_s3_client()
         try:
             return action_func(client, *args, **kwargs)
+        except S3OperationAbortedError:
+            raise
         except Exception as e:
             attempts += 1
             proxies_list = load_proxies()
             print(f"[!] S3 operation '{operation_name}' failed (Attempt {attempts}) using proxy index {current_proxy_index}: {e}")
+
+            # Without a proxy, a 404 came directly from S3 and retrying cannot
+            # create an object that does not exist.
+            if not proxies_list and is_s3_object_not_found(e):
+                raise S3ObjectNotFoundError(
+                    f"S3 object required by '{operation_name}' does not exist"
+                ) from e
             
             # Rotate to the next proxy
             if proxies_list:
@@ -78,6 +127,7 @@ def execute_s3_with_failover(operation_name, action_func, *args, **kwargs):
             if proxies_list and attempts % len(proxies_list) == 0:
                 print("[!] Full proxy cycle completed. Attempting direct S3 connection check...")
                 try:
+                    raise_if_s3_operation_aborted(operation_name, abort_if)
                     direct_args = {
                         'service_name': 's3',
                         'aws_access_key_id': settings.AWS_S3_ACCESS_KEY_ID,
@@ -88,10 +138,17 @@ def execute_s3_with_failover(operation_name, action_func, *args, **kwargs):
                     }
                     direct_client = boto3.client(**direct_args)
                     return action_func(direct_client, *args, **kwargs)
+                except S3OperationAbortedError:
+                    raise
                 except Exception as direct_err:
                     print(f"[!] Direct S3 check failed: {direct_err}")
+                    if is_s3_object_not_found(direct_err):
+                        raise S3ObjectNotFoundError(
+                            f"S3 object required by '{operation_name}' does not exist"
+                        ) from direct_err
             
             # Progressive backoff to avoid hammering
+            raise_if_s3_operation_aborted(operation_name, abort_if)
             sleep_time = min(5, attempts)
             print(f"  [*] Retrying S3 operation in {sleep_time}s...")
             time.sleep(sleep_time)
@@ -155,7 +212,13 @@ def delete_from_s3(key: str, is_public: bool):
     except Exception as e:
         print(f"Error deleting {key} from S3: {e}")
 
-def upload_to_s3(file_content: bytes, key: str, is_public: bool, content_type: str = "image/png") -> str:
+def upload_to_s3(
+    file_content: bytes,
+    key: str,
+    is_public: bool,
+    content_type: str = "image/png",
+    abort_if=None,
+) -> str:
     """
     Upload file to S3 and return the Key
     """
@@ -173,9 +236,13 @@ def upload_to_s3(file_content: bytes, key: str, is_public: bool, content_type: s
         client.put_object(**upload_args)
         return key
         
-    return execute_s3_with_failover("upload_to_s3", _action)
+    return execute_s3_with_failover(
+        "upload_to_s3",
+        _action,
+        abort_if=abort_if,
+    )
 
-def download_from_s3(key: str, is_public: bool) -> bytes:
+def download_from_s3(key: str, is_public: bool, abort_if=None) -> bytes:
     """
     Download file content from S3
     """
@@ -185,4 +252,8 @@ def download_from_s3(key: str, is_public: bool) -> bytes:
         response = client.get_object(Bucket=bucket, Key=key)
         return response['Body'].read()
         
-    return execute_s3_with_failover("download_from_s3", _action)
+    return execute_s3_with_failover(
+        "download_from_s3",
+        _action,
+        abort_if=abort_if,
+    )

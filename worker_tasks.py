@@ -7,7 +7,12 @@ from PIL import Image
 import sys
 import os
 from config import settings, load_redis_urls
-from s3_utils import upload_to_s3, download_from_s3
+from s3_utils import (
+    S3ObjectNotFoundError,
+    S3OperationAbortedError,
+    download_from_s3,
+    upload_to_s3,
+)
 from mc_voxel_texture_resolver import resolve_voxel_consistency
 import asyncio
 import json
@@ -50,6 +55,10 @@ q_edit = Queue('queue_image_edit', connection=redis_conn)
 q_skin = Queue('queue_image_to_skin', connection=redis_conn)
 retry_policy = Retry(max=99999, interval=[5, 10, 30, 60])
 RESULT_QUEUE_KEY = os.getenv("GENERATE_RESULT_QUEUE_KEY", "generate_results")
+GENERATION_CANCELLATION_KEY_PREFIX = os.getenv(
+    "GENERATION_CANCELLATION_KEY_PREFIX",
+    "generation:cancelled:",
+)
 RECOVERABLE_MODEL_VERSIONS = {
     version.strip()
     for version in os.getenv(
@@ -178,6 +187,26 @@ def make_generation_job_id(log_id: str, stage: str) -> str:
     return f"generation_{log_id}_{stage}"
 
 
+def generation_cancellation_key(log_id: str) -> str:
+    return f"{GENERATION_CANCELLATION_KEY_PREFIX}{log_id}"
+
+
+def is_generation_cancelled(log_id: str) -> bool:
+    try:
+        return bool(redis_conn.exists(generation_cancellation_key(log_id)))
+    except Exception as exc:
+        # A Redis outage must not be mistaken for a user cancellation.
+        print(f"[!] [{log_id}] Failed to check cancellation state: {exc}")
+        return False
+
+
+def ensure_generation_active(log_id: str) -> None:
+    if is_generation_cancelled(log_id):
+        raise S3OperationAbortedError(
+            f"Generation {log_id} was cancelled"
+        )
+
+
 def get_registry_job_ids(registry):
     try:
         return registry.get_job_ids(cleanup=False)
@@ -251,7 +280,12 @@ def report_status(log_id: str, status: str, result: str = None, edited_result: s
     if pipeline_version is not None: payload["pipeline_version"] = pipeline_version
     redis_conn.lpush(RESULT_QUEUE_KEY, json.dumps(payload))
 
-def process_and_upload_final_skin(img_data_bytes: bytes, s3id_result: str, is_public: bool) -> str:
+def process_and_upload_final_skin(
+    img_data_bytes: bytes,
+    s3id_result: str,
+    is_public: bool,
+    abort_if=None,
+) -> str:
     t_start = time.time()
     img = Image.open(io.BytesIO(img_data_bytes))
     img = img.crop((0, 0, img.width // 2, img.height // 2))
@@ -268,14 +302,22 @@ def process_and_upload_final_skin(img_data_bytes: bytes, s3id_result: str, is_pu
     filename = f"generations/{s3id_result}.png"
     
     t_up = time.time()
-    upload_to_s3(img_io.getvalue(), filename, is_public, "image/png")
+    upload_to_s3(
+        img_io.getvalue(),
+        filename,
+        is_public,
+        "image/png",
+        abort_if=abort_if,
+    )
     t_end = time.time()
     
     print(f"[*] Crop/Format: {t_bg - t_start:.2f}s, RemoveBG: {t_voxel - t_bg:.2f}s, Voxel: {t_post - t_voxel:.2f}s, S3 Upload: {t_end - t_up:.2f}s, Total post-process: {t_end - t_start:.2f}s")
     return filename
 
 async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, model_version: str, aux_model_version: str = None, seed: int = None, n_step: int = None, guidance: float = None):
+    abort_if = lambda: is_generation_cancelled(log_id)
     try:
+        ensure_generation_active(log_id)
         report_status(log_id, "processing", stage="text_to_image")
         
         global text_to_img_pipe
@@ -302,6 +344,7 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
         images = pipeline_output.images
         t_pipe_end = time.time()
         print(f"[*] [{log_id}] ZImagePipeline inference took {t_pipe_end - t_pipe_start:.2f}s")
+        ensure_generation_active(log_id)
         
         # Convert generated image to JPEG bytes
         img_io = io.BytesIO()
@@ -316,9 +359,16 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
         intermediate_filename = f"text_to_image_intermediate/{s3id_result}.jpg"
         
         t_up_start = time.time()
-        upload_to_s3(img_data, intermediate_filename, is_public, "image/jpeg")
+        upload_to_s3(
+            img_data,
+            intermediate_filename,
+            is_public,
+            "image/jpeg",
+            abort_if=abort_if,
+        )
         t_up_end = time.time()
         print(f"[*] [{log_id}] Upload intermediate to S3 took {t_up_end - t_up_start:.2f}s")
+        ensure_generation_active(log_id)
         
         # Dispatch to the specialized queue for the next stage: image_to_skin
         job = get_current_job()
@@ -346,6 +396,18 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
             edited_result=get_job_intermediate_filename(skin_job, intermediate_filename),
             stage="text_to_image",
         )
+    except S3OperationAbortedError as exc:
+        print(f"[*] [{log_id}] Text-to-image task cancelled: {exc}")
+        return
+    except S3ObjectNotFoundError as exc:
+        print(f"[!] [{log_id}] Text-to-image input is missing: {exc}")
+        report_status(
+            log_id,
+            "failed",
+            error_msg=str(exc),
+            stage="text_to_image",
+        )
+        return
     except Exception as e:
         import traceback
         err_detail = traceback.format_exc()
@@ -354,11 +416,17 @@ async def task_text_to_image_async(log_id: str, is_public: bool, prompt: str, mo
         raise e
 
 async def task_image_edit_async(log_id: str, is_public: bool, source: str, content_type: str, prompt: str, model_version: str, aux_model_version: str = None, seed: int = None, n_step: int = None, guidance: float = None):
+    abort_if = lambda: is_generation_cancelled(log_id)
     try:
+        ensure_generation_active(log_id)
         report_status(log_id, "processing", stage="image_edit")
         
         t_dl_start = time.time()
-        file_content = download_from_s3(source, is_public)
+        file_content = download_from_s3(
+            source,
+            is_public,
+            abort_if=abort_if,
+        )
         t_dl_end = time.time()
         print(f"[*] [{log_id}] Download image from S3 took {t_dl_end - t_dl_start:.2f}s")
 
@@ -389,6 +457,7 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
         images = pipeline_output.images
         t_pipe_end = time.time()
         print(f"[*] [{log_id}] Flux2KleinPipeline (edit) inference took {t_pipe_end - t_pipe_start:.2f}s")
+        ensure_generation_active(log_id)
         
         # Convert generated image to JPEG bytes
         img_io = io.BytesIO()
@@ -399,9 +468,16 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
         intermediate_filename = f"image_edit/{s3id_result}.jpg"
         
         t_up_start = time.time()
-        upload_to_s3(img_data, intermediate_filename, is_public, "image/jpeg")
+        upload_to_s3(
+            img_data,
+            intermediate_filename,
+            is_public,
+            "image/jpeg",
+            abort_if=abort_if,
+        )
         t_up_end = time.time()
         print(f"[*] [{log_id}] Upload intermediate to S3 took {t_up_end - t_up_start:.2f}s")
+        ensure_generation_active(log_id)
         
         # Dispatch to the specialized queue for the next stage: image_to_skin
         job = get_current_job()
@@ -429,6 +505,18 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
             edited_result=get_job_intermediate_filename(skin_job, intermediate_filename),
             stage="image_edit",
         )
+    except S3OperationAbortedError as exc:
+        print(f"[*] [{log_id}] Image-edit task cancelled: {exc}")
+        return
+    except S3ObjectNotFoundError as exc:
+        print(f"[!] [{log_id}] Image-edit input is missing: {exc}")
+        report_status(
+            log_id,
+            "failed",
+            error_msg=str(exc),
+            stage="image_edit",
+        )
+        return
     except Exception as e:
         import traceback
         err_detail = traceback.format_exc()
@@ -437,11 +525,17 @@ async def task_image_edit_async(log_id: str, is_public: bool, source: str, conte
         raise e
 
 async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, content_type: str, prompt: str, model_version: str = None, aux_model_version: str = None, seed: int = None, n_step: int = None, guidance: float = None, intermediate_filename: str = None):
+    abort_if = lambda: is_generation_cancelled(log_id)
     try:
+        ensure_generation_active(log_id)
         report_status(log_id, "processing_skin", stage="image_to_skin")
         
         t_dl_start = time.time()
-        file_content = download_from_s3(source, is_public)
+        file_content = download_from_s3(
+            source,
+            is_public,
+            abort_if=abort_if,
+        )
         t_dl_end = time.time()
         print(f"[*] [{log_id}] Download image from S3 took {t_dl_end - t_dl_start:.2f}s")
 
@@ -494,6 +588,7 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
         images = pipeline_output.images
         t_pipe_end = time.time()
         print(f"[*] [{log_id}] Flux2KleinPipeline (skin) inference took {t_pipe_end - t_pipe_start:.2f}s")
+        ensure_generation_active(log_id)
         
         # Convert generated image to PNG bytes
         img_io = io.BytesIO()
@@ -504,11 +599,28 @@ async def task_image_to_skin_async(log_id: str, is_public: bool, source: str, co
         s3id_result = log_id
         
         t_post_start = time.time()
-        final_filename = process_and_upload_final_skin(img_data, s3id_result, is_public)
+        final_filename = process_and_upload_final_skin(
+            img_data,
+            s3id_result,
+            is_public,
+            abort_if=abort_if,
+        )
         t_post_end = time.time()
         print(f"[*] [{log_id}] Complete post-processing and final upload took {t_post_end - t_post_start:.2f}s")
 
         report_status(log_id, "success", result=final_filename, edited_result=intermediate_filename, stage="image_to_skin")
+    except S3OperationAbortedError as exc:
+        print(f"[*] [{log_id}] Image-to-skin task cancelled: {exc}")
+        return
+    except S3ObjectNotFoundError as exc:
+        print(f"[!] [{log_id}] Image-to-skin source is missing: {exc}")
+        report_status(
+            log_id,
+            "failed",
+            error_msg=str(exc),
+            stage="image_to_skin",
+        )
+        return
     except Exception as e:
         import traceback
         err_detail = traceback.format_exc()
@@ -534,7 +646,9 @@ def task_render_to_uv(
     pipeline_version: str,
 ):
     del content_type
+    abort_if = lambda: is_generation_cancelled(log_id)
     try:
+        ensure_generation_active(log_id)
         if pipeline_version != settings.DENSE_UV_PIPELINE_VERSION:
             raise ValueError(
                 "Dense UV pipeline version mismatch: "
@@ -548,14 +662,20 @@ def task_render_to_uv(
             stage="render_to_uv",
             pipeline_version=pipeline_version,
         )
-        combined_render = download_from_s3(source, is_public)
+        combined_render = download_from_s3(
+            source,
+            is_public,
+            abort_if=abort_if,
+        )
         skin_png = init_dense_uv_pipeline().infer_png(combined_render)
+        ensure_generation_active(log_id)
         final_filename = f"generations/{log_id}.png"
         upload_to_s3(
             skin_png,
             final_filename,
             is_public,
             "image/png",
+            abort_if=abort_if,
         )
         report_status(
             log_id,
@@ -565,6 +685,19 @@ def task_render_to_uv(
             stage="render_to_uv",
             pipeline_version=pipeline_version,
         )
+    except S3OperationAbortedError as exc:
+        print(f"[*] [{log_id}] Dense UV task cancelled: {exc}")
+        return
+    except S3ObjectNotFoundError as exc:
+        print(f"[!] [{log_id}] Dense UV input is missing: {exc}")
+        report_status(
+            log_id,
+            "failed",
+            error_msg=str(exc),
+            stage="render_to_uv",
+            pipeline_version=pipeline_version,
+        )
+        return
     except Exception as exc:
         import traceback
 
