@@ -31,8 +31,9 @@ sys.stderr = SafeStream(sys.stderr)
 sys.stdout = SafeStream(sys.stdout)
 
 from redis import Redis
-from rq import Worker, Queue, SimpleWorker
+from rq import Worker, Queue
 from config import settings, load_redis_urls
+from gpu_worker import GPUWorker
 
 current_redis_index = 0
 
@@ -124,8 +125,8 @@ def run_worker():
             print("[*] Pre-loading Dense UV pipeline for render_to_uv tasks...")
             worker_tasks.init_dense_uv_pipeline()
             
-        print("[*] All requested models loaded. Using SimpleWorker to maintain GPU memory.")
-        worker_cls = SimpleWorker
+        print("[*] All requested models loaded. Using GPUWorker to maintain GPU memory.")
+        worker_cls = GPUWorker
 
     while True:
         # 1. Get a working Redis connection dynamically

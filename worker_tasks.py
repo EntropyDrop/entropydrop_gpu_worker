@@ -15,6 +15,7 @@ import redis
 from rq import Queue, Retry, get_current_job
 from rq.job import Job
 from rq.registry import StartedJobRegistry, DeferredJobRegistry, ScheduledJobRegistry
+from gpu_worker import IMAGE_TO_SKIN_JOB_TIMEOUT
 from diffusers import Flux2KleinPipeline
 import torch
 # Select a working Redis connection dynamically at import time for worker_tasks
@@ -48,10 +49,6 @@ q_t2i = Queue('queue_text_to_image', connection=redis_conn)
 q_edit = Queue('queue_image_edit', connection=redis_conn)
 q_skin = Queue('queue_image_to_skin', connection=redis_conn)
 retry_policy = Retry(max=99999, interval=[5, 10, 30, 60])
-# S3 operations have their own infinite failover/retry loop. Disabling RQ's
-# overall timeout keeps the current image_to_skin job running until S3
-# recovers instead of letting the worker move on to the next queued job.
-IMAGE_TO_SKIN_JOB_TIMEOUT = -1
 RESULT_QUEUE_KEY = os.getenv("GENERATE_RESULT_QUEUE_KEY", "generate_results")
 RECOVERABLE_MODEL_VERSIONS = {
     version.strip()
