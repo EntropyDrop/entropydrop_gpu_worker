@@ -1,8 +1,13 @@
-from rq import SimpleWorker
+from rq import SimpleWorker, get_current_job
 
 
 IMAGE_TO_SKIN_TASK_NAME = "worker_tasks.task_image_to_skin"
 IMAGE_TO_SKIN_JOB_TIMEOUT = -1
+
+
+def current_job_will_retry() -> bool:
+    job = get_current_job()
+    return bool(job and (getattr(job, "retries_left", 0) or 0) > 0)
 
 
 def enforce_image_to_skin_timeout(job) -> bool:

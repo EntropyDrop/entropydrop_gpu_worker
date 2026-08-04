@@ -20,7 +20,7 @@ import redis
 from rq import Queue, Retry, get_current_job
 from rq.job import Job
 from rq.registry import StartedJobRegistry, DeferredJobRegistry, ScheduledJobRegistry
-from gpu_worker import IMAGE_TO_SKIN_JOB_TIMEOUT
+from gpu_worker import IMAGE_TO_SKIN_JOB_TIMEOUT, current_job_will_retry
 from diffusers import Flux2KleinPipeline
 import torch
 # Select a working Redis connection dynamically at import time for worker_tasks
@@ -702,13 +702,14 @@ def task_render_to_uv(
         import traceback
 
         error_detail = traceback.format_exc()
+        will_retry = current_job_will_retry()
         print(
             f"[{log_id}] Dense UV task failed with exception:\n"
             f"{error_detail}"
         )
         report_status(
             log_id,
-            "failed",
+            "processing_skin" if will_retry else "failed",
             error_msg=f"{exc}\n\n{error_detail}",
             stage="render_to_uv",
             pipeline_version=pipeline_version,

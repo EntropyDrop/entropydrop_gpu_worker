@@ -5,6 +5,7 @@ from rq import SimpleWorker
 from gpu_worker import (
     GPUWorker,
     IMAGE_TO_SKIN_JOB_TIMEOUT,
+    current_job_will_retry,
     enforce_image_to_skin_timeout,
 )
 
@@ -48,3 +49,21 @@ def test_gpu_worker_overrides_timeout_before_rq_prepares_execution(monkeypatch):
     worker.execute_job(job, SimpleNamespace())
 
     assert observed_timeouts == [-1]
+
+
+def test_current_job_reports_whether_rq_retry_remains(monkeypatch):
+    import gpu_worker
+
+    monkeypatch.setattr(
+        gpu_worker,
+        "get_current_job",
+        lambda: SimpleNamespace(retries_left=2),
+    )
+    assert current_job_will_retry() is True
+
+    monkeypatch.setattr(
+        gpu_worker,
+        "get_current_job",
+        lambda: SimpleNamespace(retries_left=0),
+    )
+    assert current_job_will_retry() is False
