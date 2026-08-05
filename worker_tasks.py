@@ -6,6 +6,7 @@ import base64
 from PIL import Image
 import sys
 import os
+from asset_paths import dense_uv_asset_paths
 from config import settings, load_redis_urls
 from s3_utils import (
     S3ObjectNotFoundError,
@@ -73,29 +74,40 @@ img_to_skin_pipe = None
 img_edit_pipe = None
 text_to_img_pipe = None
 skin_gen_prompt_embeds = None
-dense_uv_pipe = None
+dense_uv_pipes = {}
 
 # Track currently loaded LoRA for img_to_skin_pipe
 current_lora_name = None
 
 
-def init_dense_uv_pipeline():
-    global dense_uv_pipe
-    if dense_uv_pipe is not None:
-        return dense_uv_pipe
+def init_dense_uv_pipeline(
+    model_version: str,
+    dense_uv_checkpoint_file: str,
+    DMR_mappings_dir: str,
+):
+    checkpoint_path, mappings_dir = dense_uv_asset_paths(
+        settings.SKING_ROOT_DIR,
+        settings.DMR_ROOT_DIR,
+        dense_uv_checkpoint_file,
+        DMR_mappings_dir,
+    )
+    cache_key = (model_version, str(checkpoint_path), str(mappings_dir))
+    if cache_key in dense_uv_pipes:
+        return dense_uv_pipes[cache_key]
 
     from dense_uv_runtime import DenseUVInferenceRuntime
 
     print(
         "[*] Loading Dense UV pipeline "
-        f"from {settings.DENSE_UV_CHECKPOINT_PATH}..."
+        f"for {model_version} from {checkpoint_path}..."
     )
     dense_uv_pipe = DenseUVInferenceRuntime(
         toolkit_root=settings.SKING_TOOLKIT_ROOT,
-        checkpoint_path=settings.DENSE_UV_CHECKPOINT_PATH,
-        mappings_dir=settings.DENSE_UV_MAPPINGS_DIR,
+        checkpoint_path=str(checkpoint_path),
+        mappings_dir=str(mappings_dir),
         device=settings.DENSE_UV_DEVICE,
     )
+    dense_uv_pipes[cache_key] = dense_uv_pipe
     print("[*] Dense UV checkpoint, SigLIP2, and mappings loaded.")
     return dense_uv_pipe
 
@@ -269,7 +281,7 @@ def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filena
     return job, True
 
 
-def report_status(log_id: str, status: str, result: str = None, edited_result: str = None, error_msg: str = None, source: str = None, stage: str = None, pipeline_version: str = None):
+def report_status(log_id: str, status: str, result: str = None, edited_result: str = None, error_msg: str = None, source: str = None, stage: str = None, model_version: str = None):
     """Push status report to Redis"""
     payload = {"log_id": log_id, "status": status}
     if result is not None: payload["result"] = result
@@ -277,7 +289,7 @@ def report_status(log_id: str, status: str, result: str = None, edited_result: s
     if error_msg is not None: payload["error_msg"] = error_msg
     if source is not None: payload["source"] = source
     if stage is not None: payload["stage"] = stage
-    if pipeline_version is not None: payload["pipeline_version"] = pipeline_version
+    if model_version is not None: payload["model_version"] = model_version
     redis_conn.lpush(RESULT_QUEUE_KEY, json.dumps(payload))
 
 def process_and_upload_final_skin(
@@ -643,31 +655,32 @@ def task_render_to_uv(
     is_public: bool,
     source: str,
     content_type: str,
-    pipeline_version: str,
+    model_version: str,
+    dense_uv_checkpoint_file: str,
+    DMR_mappings_dir: str,
 ):
     del content_type
     abort_if = lambda: is_generation_cancelled(log_id)
     try:
         ensure_generation_active(log_id)
-        if pipeline_version != settings.DENSE_UV_PIPELINE_VERSION:
-            raise ValueError(
-                "Dense UV pipeline version mismatch: "
-                f"task={pipeline_version!r}, "
-                f"worker={settings.DENSE_UV_PIPELINE_VERSION!r}"
-            )
-
         report_status(
             log_id,
             "processing_skin",
             stage="render_to_uv",
-            pipeline_version=pipeline_version,
+            model_version=model_version,
         )
         combined_render = download_from_s3(
             source,
             is_public,
             abort_if=abort_if,
         )
-        skin_png = init_dense_uv_pipeline().infer_png(combined_render)
+        skin_png = init_dense_uv_pipeline(
+            model_version,
+            dense_uv_checkpoint_file,
+            DMR_mappings_dir,
+        ).infer_png(
+            combined_render
+        )
         ensure_generation_active(log_id)
         final_filename = f"generations/{log_id}.png"
         upload_to_s3(
@@ -683,7 +696,7 @@ def task_render_to_uv(
             result=final_filename,
             edited_result=source,
             stage="render_to_uv",
-            pipeline_version=pipeline_version,
+            model_version=model_version,
         )
     except S3OperationAbortedError as exc:
         print(f"[*] [{log_id}] Dense UV task cancelled: {exc}")
@@ -695,7 +708,7 @@ def task_render_to_uv(
             "failed",
             error_msg=str(exc),
             stage="render_to_uv",
-            pipeline_version=pipeline_version,
+            model_version=model_version,
         )
         return
     except Exception as exc:
@@ -712,6 +725,6 @@ def task_render_to_uv(
             "processing_skin" if will_retry else "failed",
             error_msg=f"{exc}\n\n{error_detail}",
             stage="render_to_uv",
-            pipeline_version=pipeline_version,
+            model_version=model_version,
         )
         raise

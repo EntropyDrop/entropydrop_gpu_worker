@@ -122,10 +122,12 @@ def run_worker():
             worker_tasks.init_img_to_skin_pipeline()
 
         if 'queue_render_to_uv' in listen or 'high_queue_render_to_uv' in listen:
-            print("[*] Pre-loading Dense UV pipeline for render_to_uv tasks...")
-            worker_tasks.init_dense_uv_pipeline()
+            print(
+                "[*] Dense UV pipeline will load lazily from the first "
+                "render_to_uv task parameters."
+            )
             
-        print("[*] All requested models loaded. Using GPUWorker to maintain GPU memory.")
+        print("[*] GPU worker initialization complete; loaded models stay in memory.")
         worker_cls = GPUWorker
 
     while True:

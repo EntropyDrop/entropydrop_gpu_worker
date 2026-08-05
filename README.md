@@ -1,10 +1,10 @@
 # EntropyDrop GPU Worker
 
-## SKING_DDJ_v54
+## SKING_DDJ series
 
-`SKING_DDJ_v54` uses a dedicated GPU process that consumes
-`queue_render_to_uv`. The process loads the Dense UV parser checkpoint,
-SigLIP2, and renderer mappings once at startup and retains them for all jobs.
+`SKING_DDJ` uses a dedicated GPU process that consumes `queue_render_to_uv`.
+The process loads the Dense UV parser checkpoint, SigLIP2, and renderer mappings
+from the first task and retains each distinct asset combination for later jobs.
 
 Required runtime files:
 
@@ -14,8 +14,10 @@ Required runtime files:
 /root/differentiable_minecraft_renderer/mappings_256x512
 ```
 
-The paths can be overridden with `SKING_TOOLKIT_ROOT`,
-`DENSE_UV_CHECKPOINT_PATH`, and `DENSE_UV_MAPPINGS_DIR`.
+The backend sends `dense_uv_checkpoint_file` and `DMR_mappings_dir` as task
+parameters. This worker has no model-to-pipeline registry. It joins those
+relative values to `SKING_ROOT_DIR` and `DMR_ROOT_DIR`; `SKING_TOOLKIT_ROOT` and
+`DENSE_UV_DEVICE` also remain deployment settings.
 
 Start exactly one Dense UV process per GPU:
 
