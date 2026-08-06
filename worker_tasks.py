@@ -281,8 +281,10 @@ def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filena
     return job, True
 
 
-def report_status(log_id: str, status: str, result: str = None, edited_result: str = None, error_msg: str = None, source: str = None, stage: str = None, model_version: str = None):
+def report_status(log_id: str, status: str, result: str = None, edited_result: str = None, error_msg: str = None, source: str = None, stage: str = None, model_version: str = None, provider_submission_state: str = None):
     """Push status report to Redis"""
+    if provider_submission_state == "unknown":
+        status = "failed"
     payload = {"log_id": log_id, "status": status}
     if result is not None: payload["result"] = result
     if edited_result is not None: payload["edited_result"] = edited_result
@@ -290,6 +292,7 @@ def report_status(log_id: str, status: str, result: str = None, edited_result: s
     if source is not None: payload["source"] = source
     if stage is not None: payload["stage"] = stage
     if model_version is not None: payload["model_version"] = model_version
+    if provider_submission_state is not None: payload["provider_submission_state"] = provider_submission_state
     redis_conn.lpush(RESULT_QUEUE_KEY, json.dumps(payload))
 
 def process_and_upload_final_skin(
