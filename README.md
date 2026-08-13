@@ -10,7 +10,7 @@ Required runtime files:
 
 ```text
 /root/SkingToolkit
-/root/Sking/SKING_DDJ_v54.pt
+/root/Sking/SKING_DDJ_v66.pt
 /root/differentiable_minecraft_renderer/mappings_256x512
 ```
 
