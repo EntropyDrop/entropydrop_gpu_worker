@@ -52,6 +52,7 @@ class DenseUVInferenceRuntime:
             view_native_size,
         )
         from SkingToolkit.dense_uv_parser.utils import (
+            attach_projected_head_outer_structure,
             attach_projected_outer_uv_occupancy,
             estimate_top_left_flood_foreground,
             parse_views,
@@ -70,6 +71,9 @@ class DenseUVInferenceRuntime:
         self.attach_projected_outer_uv_occupancy = (
             attach_projected_outer_uv_occupancy
         )
+        self.attach_projected_head_outer_structure = (
+            attach_projected_head_outer_structure
+        )
         self.splat = splat_parser_predictions_to_uv_conditioning
         self.preprocessing = production_preprocessing_defaults()
         self.splat_kwargs = production_splat_defaults()
@@ -79,6 +83,25 @@ class DenseUVInferenceRuntime:
             str(checkpoint),
             self.device,
         )
+        head_precision = self.parser_args.get(
+            "_checkpoint_head_outer_occupancy_precision"
+        )
+        head_recall = self.parser_args.get(
+            "_checkpoint_head_outer_occupancy_recall"
+        )
+        head_reliable = (
+            head_precision is not None
+            and head_recall is not None
+            and head_precision
+            >= self.preprocessing["head_outer_topology_min_precision"]
+            and head_recall
+            >= self.preprocessing["head_outer_topology_min_recall"]
+        )
+        if self.preprocessing["head_outer_topology_auto_reliability"]:
+            self.splat_kwargs["head_outer_topology_rescue"] = bool(
+                self.splat_kwargs["head_outer_topology_rescue"]
+                and head_reliable
+            )
         self.views = parse_views(
             self.parser_args.get(
                 "views",
@@ -186,6 +209,16 @@ class DenseUVInferenceRuntime:
             # Keep the production path identical to infer.py for checkpoints
             # that include the projected UV occupancy branch.
             outputs = self.attach_projected_outer_uv_occupancy(
+                self.model,
+                outputs,
+                self.renderer,
+                self.views,
+                observed_foreground=observed_foreground,
+                center_power=float(
+                    self.parser_args.get("route_texel_center_power", 2.0)
+                ),
+            )
+            outputs = self.attach_projected_head_outer_structure(
                 self.model,
                 outputs,
                 self.renderer,
