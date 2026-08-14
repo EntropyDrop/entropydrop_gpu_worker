@@ -36,3 +36,7 @@ Dense UV jobs are enqueued with five bounded retries by both the stage-1 worker
 and backend recovery path. A transient attempt reports `processing_skin`; only
 the final exhausted attempt reports `failed`, so a paid Provider result is not
 discarded because of a temporary S3, Redis, or GPU-worker interruption.
+
+The Dense UV stage reports its normalized real-to-render input as
+`image_to_skin_edited_result`. `edited_result` remains reserved for the
+text-to-skin or image-edit-to-skin first-stage artifact.

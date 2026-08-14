@@ -281,13 +281,28 @@ def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filena
     return job, True
 
 
-def report_status(log_id: str, status: str, result: str = None, edited_result: str = None, error_msg: str = None, source: str = None, stage: str = None, model_version: str = None, provider_submission_state: str = None):
+def report_status(
+    log_id: str,
+    status: str,
+    result: str = None,
+    edited_result: str = None,
+    image_to_skin_edited_result: str = None,
+    error_msg: str = None,
+    source: str = None,
+    stage: str = None,
+    model_version: str = None,
+    provider_submission_state: str = None,
+):
     """Push status report to Redis"""
     if provider_submission_state == "unknown":
         status = "failed"
     payload = {"log_id": log_id, "status": status}
     if result is not None: payload["result"] = result
     if edited_result is not None: payload["edited_result"] = edited_result
+    if image_to_skin_edited_result is not None:
+        payload["image_to_skin_edited_result"] = (
+            image_to_skin_edited_result
+        )
     if error_msg is not None: payload["error_msg"] = error_msg
     if source is not None: payload["source"] = source
     if stage is not None: payload["stage"] = stage
@@ -697,7 +712,7 @@ def task_render_to_uv(
             log_id,
             "success",
             result=final_filename,
-            edited_result=source,
+            image_to_skin_edited_result=source,
             stage="render_to_uv",
             model_version=model_version,
         )
