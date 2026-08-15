@@ -51,6 +51,9 @@ class DenseUVInferenceRuntime:
             tensor_to_rgba_image,
             view_native_size,
         )
+        from SkingToolkit.dense_uv_parser.semantic_targets import (
+            head_outer_face_values_to_uv,
+        )
         from SkingToolkit.dense_uv_parser.utils import (
             attach_projected_head_outer_structure,
             attach_projected_outer_uv_occupancy,
@@ -66,6 +69,7 @@ class DenseUVInferenceRuntime:
         self.image_to_render_tensor = image_to_render_tensor
         self.simple_inpaint_uv = simple_inpaint_uv
         self.tensor_to_rgba_image = tensor_to_rgba_image
+        self.head_outer_face_values_to_uv = head_outer_face_values_to_uv
         self.view_native_size = view_native_size
         self.estimate_foreground = estimate_top_left_flood_foreground
         self.attach_projected_outer_uv_occupancy = (
@@ -77,6 +81,29 @@ class DenseUVInferenceRuntime:
         self.splat = splat_parser_predictions_to_uv_conditioning
         self.preprocessing = production_preprocessing_defaults()
         self.splat_kwargs = production_splat_defaults()
+        self.inpaint_kwargs = {
+            "head_outer_threshold": self.splat_kwargs.pop(
+                "head_outer_completion_threshold"
+            ),
+            "head_outer_min_component_seeds": self.splat_kwargs.pop(
+                "head_outer_completion_min_component_seeds"
+            ),
+            "head_outer_symmetry_threshold": self.splat_kwargs.pop(
+                "head_outer_symmetry_completion_threshold"
+            ),
+            "head_outer_symmetry_candidate_threshold": self.splat_kwargs.pop(
+                "head_outer_symmetry_candidate_threshold"
+            ),
+            "head_outer_closed_ring_threshold": self.splat_kwargs.pop(
+                "head_outer_closed_ring_completion_threshold"
+            ),
+            "head_outer_open_top_threshold": self.splat_kwargs.pop(
+                "head_outer_open_top_completion_threshold"
+            ),
+            "head_outer_open_top_max_gap": self.splat_kwargs.pop(
+                "head_outer_open_top_max_gap"
+            ),
+        }
 
         self.device = get_device(device)
         self.model, self.parser_args = load_parser(
@@ -224,6 +251,7 @@ class DenseUVInferenceRuntime:
                 self.renderer,
                 self.views,
                 observed_foreground=observed_foreground,
+                source_images=parser_rendered,
                 center_power=float(
                     self.parser_args.get("route_texel_center_power", 2.0)
                 ),
@@ -240,9 +268,52 @@ class DenseUVInferenceRuntime:
                 return_details=True,
             )
 
+        head_outer_probability = None
+        head_outer_symmetry_probability = None
+        head_outer_closed_ring_probability = None
+        head_outer_open_top_probability = None
+        if (
+            int(
+                getattr(
+                    self.model,
+                    "head_outer_projected_input_version",
+                    1,
+                )
+            )
+            >= 2
+            and self.splat_kwargs["head_outer_topology_rescue"]
+            and "head_outer_face_occupancy_logits" in outputs
+        ):
+            head_outer_probability = self.head_outer_face_values_to_uv(
+                self.torch.sigmoid(
+                    outputs["head_outer_face_occupancy_logits"].float()
+                )
+            )[0, 0].detach().cpu()
+            if "head_outer_symmetry_logit" in outputs:
+                head_outer_symmetry_probability = self.torch.sigmoid(
+                    outputs["head_outer_symmetry_logit"].float()
+                )[0].detach().cpu()
+            if "head_outer_accessory_logits" in outputs:
+                accessory_probability = self.torch.sigmoid(
+                    outputs["head_outer_accessory_logits"].float()
+                )[0].detach().cpu()
+                head_outer_closed_ring_probability = accessory_probability[0]
+                head_outer_open_top_probability = accessory_probability[1]
+
         repaired, _ = self.simple_inpaint_uv(
             conditioning.detach().cpu(),
             alpha_threshold=self.preprocessing["alpha_threshold"],
+            head_outer_probability=head_outer_probability,
+            head_outer_symmetry_probability=(
+                head_outer_symmetry_probability
+            ),
+            head_outer_closed_ring_probability=(
+                head_outer_closed_ring_probability
+            ),
+            head_outer_open_top_probability=(
+                head_outer_open_top_probability
+            ),
+            **self.inpaint_kwargs,
         )
         output = io.BytesIO()
         self.tensor_to_rgba_image(repaired).save(
