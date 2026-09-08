@@ -95,20 +95,21 @@ def init_dense_uv_pipeline(
     if cache_key in dense_uv_pipes:
         return dense_uv_pipes[cache_key]
 
-    from dense_uv_runtime import DenseUVInferenceRuntime
+    from bundled_dense_uv_runtime import create_dense_uv_runtime
 
     print(
         "[*] Loading Dense UV pipeline "
         f"for {model_version} from {checkpoint_path}..."
     )
-    dense_uv_pipe = DenseUVInferenceRuntime(
+    dense_uv_pipe = create_dense_uv_runtime(
+        model_version=model_version,
         toolkit_root=settings.SKING_TOOLKIT_ROOT,
         checkpoint_path=str(checkpoint_path),
         mappings_dir=str(mappings_dir),
         device=settings.DENSE_UV_DEVICE,
     )
     dense_uv_pipes[cache_key] = dense_uv_pipe
-    print("[*] Dense UV checkpoint, SigLIP2, and mappings loaded.")
+    print(f"[*] Dense UV runtime ready: {model_version}")
     return dense_uv_pipe
 
 def init_text_to_img_pipeline():
