@@ -152,6 +152,11 @@ def run_worker():
         except Exception as exc:
             print(f"[!] Worker loop crashed on {active_url}: {exc}")
 
+        # RQ handles SIGINT/SIGTERM by returning normally after warm shutdown.
+        # Exit this process too, so PM2 can load the next release.
+        if worker._stop_requested or worker._shutdown_requested_date is not None:
+            return
+
         # Cycle to the next connection on exit to try another host if this crashed
         urls_list = load_redis_urls()
         current_redis_index = (current_redis_index + 1) % len(urls_list)
