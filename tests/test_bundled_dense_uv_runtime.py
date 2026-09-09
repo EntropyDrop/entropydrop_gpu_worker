@@ -114,6 +114,8 @@ def test_v104_never_falls_back_to_legacy_and_old_models_still_work(bundle, monke
     root, maps = bundle
     args = dict(toolkit_root='old', checkpoint_path=str(root / 'parser.pt'), mappings_dir=str(maps), device='cuda')
     assert create_dense_uv_runtime('SKING_DDJ_v61b', **args) == 'legacy'
+    v104b_runtime = create_dense_uv_runtime('SKING_DDJ_v104b', **args)
+    assert isinstance(v104b_runtime, BundledDenseUVRuntime)
     (root / 'release.json').unlink()
     with pytest.raises(FileNotFoundError):
         create_dense_uv_runtime('SKING_DDJ_v104', **args)

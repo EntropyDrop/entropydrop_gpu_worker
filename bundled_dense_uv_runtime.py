@@ -31,8 +31,13 @@ class BundledDenseUVRuntime:
             raise ValueError('The bundled pipeline requires CUDA')
         self.root = Path(checkpoint_path).resolve().parent
         self.release = json.loads((self.root / 'release.json').read_text())
+        release_model_version = self.release.get('model_version')
+        is_matching_version = (
+            release_model_version == model_version
+            or (release_model_version == 'SKING_DDJ_v104' and model_version == 'SKING_DDJ_v104b')
+        )
         if (self.release.get('format') != 1
-                or self.release.get('model_version') != model_version
+                or not is_matching_version
                 or Path(checkpoint_path).resolve() != self.root / 'parser.pt'):
             raise ValueError('Dense UV release identity mismatch')
         if Path(mappings_dir).resolve() != Path(self.release['mappings_dir']).resolve():
@@ -120,7 +125,7 @@ class BundledDenseUVRuntime:
 
 
 def create_dense_uv_runtime(model_version, toolkit_root, checkpoint_path, mappings_dir, device):
-    if model_version == 'SKING_DDJ_v104':
+    if model_version in ('SKING_DDJ_v104', 'SKING_DDJ_v104b'):
         return BundledDenseUVRuntime(checkpoint_path, mappings_dir, model_version, device)
     from dense_uv_runtime import DenseUVInferenceRuntime
     return DenseUVInferenceRuntime(toolkit_root=toolkit_root, checkpoint_path=checkpoint_path,
