@@ -120,3 +120,20 @@ def test_v104_never_falls_back_to_legacy_and_old_models_still_work(bundle, monke
     with pytest.raises(FileNotFoundError):
         create_dense_uv_runtime('SKING_DDJ_v104', **args)
     assert old.call_count == 1
+
+
+def test_v101c_uses_its_own_bundle_and_never_falls_back(bundle, monkeypatch):
+    old = Mock(return_value='legacy')
+    monkeypatch.setitem(sys.modules, 'dense_uv_runtime', SimpleNamespace(DenseUVInferenceRuntime=old))
+    root, maps = bundle
+    args = dict(toolkit_root='old', checkpoint_path=str(root / 'parser.pt'), mappings_dir=str(maps), device='cuda')
+    with pytest.raises(ValueError, match='identity mismatch'):
+        create_dense_uv_runtime('SKING_DDJ_v101c', **args)
+    release = json.loads((root / 'release.json').read_text())
+    release['model_version'] = 'SKING_DDJ_v101c'
+    (root / 'release.json').write_text(json.dumps(release))
+    assert isinstance(create_dense_uv_runtime('SKING_DDJ_v101c', **args), BundledDenseUVRuntime)
+    (root / 'release.json').unlink()
+    with pytest.raises(FileNotFoundError):
+        create_dense_uv_runtime('SKING_DDJ_v101c', **args)
+    old.assert_not_called()

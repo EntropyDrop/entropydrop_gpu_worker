@@ -5,14 +5,22 @@ import time
 
 
 def run_v104(fixture_path, expected_sha256, reference_path=None):
+    return _run_release('SKING_DDJ_v104', fixture_path, expected_sha256, reference_path)
+
+
+def run_v101c(fixture_path, expected_sha256, reference_path=None):
+    return _run_release('SKING_DDJ_v101c', fixture_path, expected_sha256, reference_path)
+
+
+def _run_release(model_version, fixture_path, expected_sha256, reference_path):
     from worker_tasks import init_dense_uv_pipeline
     data = Path(fixture_path).read_bytes()
     if hashlib.sha256(data).hexdigest() != expected_sha256:
         raise ValueError('Smoke fixture changed')
     start = time.monotonic()
-    runtime = init_dense_uv_pipeline('SKING_DDJ_v104', 'SKING_DDJ_v104/parser.pt', 'mappings_256x512')
+    runtime = init_dense_uv_pipeline(model_version, f'{model_version}/parser.pt', 'mappings_256x512')
     result = runtime.infer_png(data)
-    report = {'model_version': 'SKING_DDJ_v104', 'seconds': round(time.monotonic() - start, 2),
+    report = {'model_version': model_version, 'seconds': round(time.monotonic() - start, 2),
             'output_sha256': hashlib.sha256(result).hexdigest(), 'bytes': len(result)}
     if reference_path is not None:
         import io

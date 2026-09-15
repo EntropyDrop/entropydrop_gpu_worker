@@ -24,7 +24,7 @@ def file_sha256(path):
 
 
 class BundledDenseUVRuntime:
-    """The trained foreground + v104 parser + final material fitting pipeline."""
+    """A pinned foreground, parser, and final material fitting pipeline."""
 
     def __init__(self, checkpoint_path, mappings_dir, model_version, device='cuda'):
         if device != 'cuda':
@@ -81,7 +81,7 @@ class BundledDenseUVRuntime:
                 raise ValueError('Dense UV expects an even square combined render (256–4096px)')
             source.verify()
         start = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix='dense-uv-v104-') as temporary:
+        with tempfile.TemporaryDirectory(prefix='dense-uv-bundled-') as temporary:
             work = Path(temporary)
             input_path = work / 'input.png'
             input_path.write_bytes(image_bytes)
@@ -125,7 +125,7 @@ class BundledDenseUVRuntime:
 
 
 def create_dense_uv_runtime(model_version, toolkit_root, checkpoint_path, mappings_dir, device):
-    if model_version in ('SKING_DDJ_v104', 'SKING_DDJ_v104b'):
+    if model_version in ('SKING_DDJ_v104', 'SKING_DDJ_v104b', 'SKING_DDJ_v101c'):
         return BundledDenseUVRuntime(checkpoint_path, mappings_dir, model_version, device)
     from dense_uv_runtime import DenseUVInferenceRuntime
     return DenseUVInferenceRuntime(toolkit_root=toolkit_root, checkpoint_path=checkpoint_path,
