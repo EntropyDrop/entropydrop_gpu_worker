@@ -22,6 +22,7 @@ from rq import Queue, Retry, get_current_job
 from rq.job import Job
 from rq.registry import StartedJobRegistry, DeferredJobRegistry, ScheduledJobRegistry
 from gpu_worker import IMAGE_TO_SKIN_JOB_TIMEOUT, current_job_will_retry
+from queue_priority import effective_queue_prefix
 from diffusers import Flux2KleinPipeline
 import torch
 # Select a working Redis connection dynamically at import time for worker_tasks
@@ -263,12 +264,16 @@ def get_job_intermediate_filename(job, fallback: str) -> str:
 
 
 def enqueue_image_to_skin_once(log_id: str, is_public: bool, intermediate_filename: str, prompt: str, guidance: float, model_version: str, aux_model_version: str, seed: int, n_step: int, queue_prefix: str):
+    queue_prefix = effective_queue_prefix(redis_conn, log_id, queue_prefix)
     target_q_skin = Queue(f"{queue_prefix}queue_image_to_skin", connection=redis_conn)
     job_id = make_generation_job_id(log_id, "image_to_skin")
-    active_job = fetch_active_job(target_q_skin, job_id)
-    if active_job:
-        print(f"[*] [{log_id}] image_to_skin job already active: {job_id}")
-        return active_job, False
+    # A subscription may have moved an existing stage to the other lane.
+    # Inspect normal before high so a concurrent promotion cannot be missed.
+    for prefix in ("", "high_"):
+        active_job = fetch_active_job(Queue(f"{prefix}queue_image_to_skin", connection=redis_conn), job_id)
+        if active_job:
+            print(f"[*] [{log_id}] image_to_skin job already active: {job_id}")
+            return active_job, False
 
     job = target_q_skin.enqueue(
         "worker_tasks.task_image_to_skin",
