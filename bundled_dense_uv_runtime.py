@@ -1,5 +1,6 @@
 """Run an immutable full UV release without mixing its imports with legacy v61."""
 import hashlib
+import atexit
 import io
 import json
 import logging
@@ -8,11 +9,21 @@ from pathlib import Path
 import signal
 import subprocess
 import tempfile
+import threading
 import time
+import weakref
 
 from PIL import Image
+from dense_uv_resident import ResidentProcess
 
 logger = logging.getLogger(__name__)
+_resident_runtimes = weakref.WeakSet()
+
+
+@atexit.register
+def _close_resident_runtimes():
+    for runtime in list(_resident_runtimes):
+        runtime.close()
 
 
 def file_sha256(path):
@@ -26,7 +37,7 @@ def file_sha256(path):
 class BundledDenseUVRuntime:
     """A pinned foreground, parser, and final material fitting pipeline."""
 
-    def __init__(self, checkpoint_path, mappings_dir, model_version, device='cuda'):
+    def __init__(self, checkpoint_path, mappings_dir, model_version, device='cuda', execution_mode=None):
         if device != 'cuda':
             raise ValueError('The bundled pipeline requires CUDA')
         self.root = Path(checkpoint_path).resolve().parent
@@ -55,6 +66,68 @@ class BundledDenseUVRuntime:
             if not os.access(self.release[key], os.X_OK):
                 raise ValueError(f'Dense UV runtime unavailable: {key}')
         self.timeout_seconds = 540
+        self.execution_mode = execution_mode or os.getenv('DENSE_UV_EXECUTION_MODE', 'resident')
+        if self.execution_mode not in ('resident', 'oneshot'):
+            raise ValueError('DENSE_UV_EXECUTION_MODE must be resident or oneshot')
+        self._stages = {}
+        self._lock = threading.RLock()
+        _resident_runtimes.add(self)
+
+    def _environment(self):
+        return {**os.environ, 'OMP_NUM_THREADS': '4', 'MKL_NUM_THREADS': '4',
+                'HF_HUB_OFFLINE': '1', 'HF_HUB_DISABLE_PROGRESS_BARS': '1',
+                'HF_HOME': str(self.root / 'hf_cache'),
+                'HF_HUB_CACHE': str(self.root / 'hf_cache/hub'),
+                'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUNBUFFERED': '1',
+                'CUBLAS_WORKSPACE_CONFIG': ':4096:8'}
+
+    def _ensure_stages(self, deadline):
+        server = Path(__file__).with_name('dense_uv_resident.py')
+        for stage in ('foreground', 'parser'):
+            if stage not in self._stages:
+                self._stages[stage] = ResidentProcess(
+                    [self.release[stage + '_python'], str(server),
+                     '--release-root', str(self.root), '--stage', stage],
+                    self.root / 'runtime', self._environment(),
+                )
+            self._stages[stage].start(deadline)
+
+    def warmup(self):
+        """Load both models before the RQ worker starts accepting jobs."""
+        if self.execution_mode == 'resident':
+            with self._lock:
+                try:
+                    self._ensure_stages(time.monotonic() + self.timeout_seconds)
+                except BaseException:
+                    self.close()
+                    raise
+
+    @property
+    def resident_pids(self):
+        return {stage: process.pid for stage, process in self._stages.items()}
+
+    def close(self):
+        with self._lock:
+            for process in self._stages.values():
+                process.close()
+            self._stages.clear()
+
+    def _run_resident(self, input_path, work):
+        deadline = time.monotonic() + self.timeout_seconds
+        self._ensure_stages(deadline)
+        index = work / 'foreground-results.json'
+        self._stages['foreground'].request(
+            dict(input=str(input_path), output=str(work / 'foreground'), manifest=str(index)), deadline,
+        )
+        probabilities = json.loads(index.read_text())['probabilities']
+        if len(probabilities) != 1:
+            raise RuntimeError('Dense UV foreground did not produce exactly one output')
+        probability = Path(probabilities[0]).resolve()
+        if not probability.is_relative_to((work / 'foreground').resolve()) or not probability.is_file():
+            raise RuntimeError('Dense UV foreground output escaped its request directory')
+        self._stages['parser'].request(
+            dict(input=str(input_path), output=str(work / 'output'), probability=str(probability)), deadline,
+        )
 
     def _run(self, command, cwd, env, log_path):
         with log_path.open('wb') as log:
@@ -75,11 +148,22 @@ class BundledDenseUVRuntime:
                 process.wait()
 
     def infer_png(self, image_bytes):
+        # Invalid input must not evict healthy resident models.
         with Image.open(io.BytesIO(image_bytes)) as source:
             width, height = source.size
             if width != height or width < 256 or width > 4096 or width % 2:
                 raise ValueError('Dense UV expects an even square combined render (256–4096px)')
             source.verify()
+        with self._lock:
+            try:
+                return self._infer_png(image_bytes)
+            except BaseException:
+                # Includes RQ's job deadline and warm-stop interrupts. Never
+                # leave an old request running on the GPU during a retry.
+                self.close()
+                raise
+
+    def _infer_png(self, image_bytes):
         start = time.monotonic()
         with tempfile.TemporaryDirectory(prefix='dense-uv-bundled-') as temporary:
             work = Path(temporary)
@@ -95,13 +179,11 @@ class BundledDenseUVRuntime:
                        '--pipeline', str(self.root / 'pipeline.json'),
                        '--probability-dir', str(work / 'foreground'),
                        '--output-dir', str(work / 'output'), '--inputs', str(input_path)]
-            env = {**os.environ, 'OMP_NUM_THREADS': '4', 'MKL_NUM_THREADS': '4',
-                   'HF_HUB_OFFLINE': '1', 'HF_HUB_DISABLE_PROGRESS_BARS': '1',
-                   'HF_HOME': str(self.root / 'hf_cache'),
-                   'HF_HUB_CACHE': str(self.root / 'hf_cache/hub'),
-                   'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUNBUFFERED': '1',
-                   'CUBLAS_WORKSPACE_CONFIG': ':4096:8', 'TMPDIR': str(work)}
-            self._run(command, self.root / 'runtime', env, work / 'inference.log')
+            env = {**self._environment(), 'TMPDIR': str(work)}
+            if self.execution_mode == 'resident':
+                self._run_resident(input_path, work)
+            else:
+                self._run(command, self.root / 'runtime', env, work / 'inference.log')
             manifests = list((work / 'output').glob('*/manifest.json'))
             if len(manifests) != 1:
                 raise RuntimeError('Dense UV did not produce exactly one completed output')

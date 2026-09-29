@@ -7,6 +7,7 @@ from PIL import Image
 import sys
 import os
 from asset_paths import dense_uv_asset_paths
+from dense_uv_cache import DenseUVRuntimeCache
 from config import settings, load_redis_urls
 from s3_utils import (
     S3ObjectNotFoundError,
@@ -75,7 +76,7 @@ img_to_skin_pipe = None
 img_edit_pipe = None
 text_to_img_pipe = None
 skin_gen_prompt_embeds = None
-dense_uv_pipes = {}
+dense_uv_runtime_cache = DenseUVRuntimeCache()
 
 # Track currently loaded LoRA for img_to_skin_pipe
 current_lora_name = None
@@ -93,25 +94,37 @@ def init_dense_uv_pipeline(
         DMR_mappings_dir,
     )
     cache_key = (model_version, str(checkpoint_path), str(mappings_dir))
-    if cache_key in dense_uv_pipes:
-        return dense_uv_pipes[cache_key]
-
     from bundled_dense_uv_runtime import create_dense_uv_runtime
 
-    print(
-        "[*] Loading Dense UV pipeline "
-        f"for {model_version} from {checkpoint_path}..."
-    )
-    dense_uv_pipe = create_dense_uv_runtime(
-        model_version=model_version,
-        toolkit_root=settings.SKING_TOOLKIT_ROOT,
-        checkpoint_path=str(checkpoint_path),
-        mappings_dir=str(mappings_dir),
-        device=settings.DENSE_UV_DEVICE,
-    )
-    dense_uv_pipes[cache_key] = dense_uv_pipe
-    print(f"[*] Dense UV runtime ready: {model_version}")
-    return dense_uv_pipe
+    def create():
+        print(f"[*] Loading Dense UV pipeline for {model_version} from {checkpoint_path}...")
+        return create_dense_uv_runtime(
+            model_version=model_version,
+            toolkit_root=settings.SKING_TOOLKIT_ROOT,
+            checkpoint_path=str(checkpoint_path),
+            mappings_dir=str(mappings_dir),
+            device=settings.DENSE_UV_DEVICE,
+        )
+
+    return dense_uv_runtime_cache.get_or_create(cache_key, create)
+
+
+def preload_dense_uv_pipeline():
+    model = os.getenv("DENSE_UV_PRELOAD_MODEL_VERSION", "").strip()
+    if not model:
+        print("[*] Dense UV will load and retain the first requested model.")
+        return
+    checkpoint = os.environ["DENSE_UV_PRELOAD_CHECKPOINT_FILE"]
+    mappings = os.environ["DENSE_UV_PRELOAD_MAPPINGS_DIR"]
+    runtime = init_dense_uv_pipeline(model, checkpoint, mappings)
+    warmup = getattr(runtime, "warmup", None)
+    if warmup is not None:
+        warmup()
+    print(f"[*] Dense UV preloaded: {model}; resident processes: {getattr(runtime, 'resident_pids', {})}")
+
+
+def close_dense_uv_pipelines():
+    dense_uv_runtime_cache.close()
 
 def init_text_to_img_pipeline():
     global text_to_img_pipe

@@ -38,7 +38,7 @@ def bundle(tmp_path):
 
 def runtime(bundle):
     root, maps = bundle
-    return BundledDenseUVRuntime(root / 'parser.pt', maps, 'SKING_DDJ_v104')
+    return BundledDenseUVRuntime(root / 'parser.pt', maps, 'SKING_DDJ_v104', execution_mode='oneshot')
 
 
 def input_bytes():
@@ -60,8 +60,10 @@ def test_rejects_changed_release_or_mappings(bundle):
 
 
 @pytest.mark.parametrize('corrupt', [False, True])
-def test_output_provenance_and_temporary_cleanup(bundle, monkeypatch, corrupt):
+@pytest.mark.parametrize('mode', ['oneshot', 'resident'])
+def test_output_provenance_and_temporary_cleanup(bundle, monkeypatch, corrupt, mode):
     r = runtime(bundle)
+    r.execution_mode = mode
     paths = []
     data = input_bytes()
     def fake_run(command, cwd, env, log_path):
@@ -80,12 +82,38 @@ def test_output_provenance_and_temporary_cleanup(bundle, monkeypatch, corrupt):
         (out / 'manifest.json').write_text(json.dumps(manifest))
         Image.new('RGBA', (64, 64), (1, 2, 3, 255)).save(out / 'pred_uv.png')
     monkeypatch.setattr(r, '_run', fake_run)
+    monkeypatch.setattr(r, '_run_resident', lambda path, work: fake_run(
+        ['foreground_batch', '--foreground-checkpoint'], work, {'HF_HUB_OFFLINE': '1'}, work / 'log'))
     if corrupt:
         with pytest.raises(RuntimeError, match='provenance'):
             r.infer_png(data)
     else:
         assert Image.open(io.BytesIO(r.infer_png(data))).size == (64, 64)
     assert paths and not paths[0].exists()
+
+
+def test_resident_failure_closes_both_models(bundle, monkeypatch):
+    r = runtime(bundle)
+    r.execution_mode = 'resident'
+    foreground, parser = Mock(), Mock()
+    r._stages = dict(foreground=foreground, parser=parser)
+    monkeypatch.setattr(r, '_run_resident', Mock(side_effect=TimeoutError('deadline')))
+    with pytest.raises(TimeoutError):
+        r.infer_png(input_bytes())
+    foreground.close.assert_called_once()
+    parser.close.assert_called_once()
+    assert not r.resident_pids
+
+
+def test_invalid_input_preserves_resident_models(bundle, monkeypatch):
+    r = runtime(bundle)
+    close = Mock()
+    monkeypatch.setattr(r, 'close', close)
+    image = io.BytesIO()
+    Image.new('RGB', (255, 256)).save(image, format='PNG')
+    with pytest.raises(ValueError, match='even square'):
+        r.infer_png(image.getvalue())
+    close.assert_not_called()
 
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='Production process groups run on Linux')
@@ -101,7 +129,11 @@ def test_timeout_kills_parser_grandchildren(bundle, tmp_path):
     pid = int(pidfile.read_text())
     for _ in range(20):
         status = Path(f'/proc/{pid}/stat')
-        if not status.exists() or status.read_text().split()[2] == 'Z':
+        try:
+            state = status.read_text().split()[2]
+        except FileNotFoundError:
+            break
+        if state == 'Z':
             break
         time.sleep(.05)
     else:

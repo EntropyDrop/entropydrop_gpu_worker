@@ -16,7 +16,7 @@ def test_warm_shutdown_exits_outer_reconnect_loop(monkeypatch, busy_shutdown):
                              _shutdown_requested_date=object(), work=Mock())
     factory = Mock(return_value=worker)
     sleep = Mock(side_effect=AssertionError('A requested shutdown must not reconnect'))
-    monkeypatch.setitem(sys.modules, 'worker_tasks', SimpleNamespace())
+    monkeypatch.setitem(sys.modules, 'worker_tasks', SimpleNamespace(preload_dense_uv_pipeline=Mock()))
     namespace = dict(Worker=factory, GPUWorker=factory, listen=['queue_render_to_uv'],
                      get_next_redis_connection=lambda: (object(), 'test-redis'),
                      Queue=lambda *a, **kw: object(), load_redis_urls=lambda: ['test-redis'],

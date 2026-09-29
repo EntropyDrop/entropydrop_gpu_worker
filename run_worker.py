@@ -122,10 +122,7 @@ def run_worker():
             worker_tasks.init_img_to_skin_pipeline()
 
         if 'queue_render_to_uv' in listen or 'high_queue_render_to_uv' in listen:
-            print(
-                "[*] Dense UV pipeline will load lazily from the first "
-                "render_to_uv task parameters."
-            )
+            worker_tasks.preload_dense_uv_pipeline()
             
         print("[*] GPU worker initialization complete; loaded models stay in memory.")
         worker_cls = GPUWorker
@@ -169,3 +166,7 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("\n[*] Worker stopped.")
         sys.exit(0)
+    finally:
+        tasks = sys.modules.get('worker_tasks')
+        if tasks is not None:
+            tasks.close_dense_uv_pipelines()
