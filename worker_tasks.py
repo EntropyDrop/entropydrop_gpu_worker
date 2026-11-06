@@ -87,11 +87,15 @@ def init_dense_uv_pipeline(
     dense_uv_checkpoint_file: str,
     DMR_mappings_dir: str,
 ):
+    allowed = {item.strip() for item in os.getenv("DENSE_UV_ALLOWED_MODEL_VERSIONS", "").split(",") if item.strip()}
+    if allowed and model_version not in allowed:
+        raise ValueError(f"Skin model is offline on this worker: {model_version}")
     checkpoint_path, mappings_dir = dense_uv_asset_paths(
         settings.SKING_ROOT_DIR,
         settings.DMR_ROOT_DIR,
         dense_uv_checkpoint_file,
         DMR_mappings_dir,
+        model_version=model_version,
     )
     cache_key = (model_version, str(checkpoint_path), str(mappings_dir))
     from bundled_dense_uv_runtime import create_dense_uv_runtime

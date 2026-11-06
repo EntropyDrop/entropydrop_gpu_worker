@@ -207,6 +207,9 @@ class BundledDenseUVRuntime:
 
 
 def create_dense_uv_runtime(model_version, toolkit_root, checkpoint_path, mappings_dir, device):
+    if model_version in {'SKING_DDJ_v130', 'SKING_DDJ_v131'}:
+        from semantic_uv_runtime import SemanticUVRuntime
+        return SemanticUVRuntime(checkpoint_path, mappings_dir, model_version, device)
     if model_version in ('SKING_DDJ_v104', 'SKING_DDJ_v104b', 'SKING_DDJ_v101c'):
         return BundledDenseUVRuntime(checkpoint_path, mappings_dir, model_version, device)
     from dense_uv_runtime import DenseUVInferenceRuntime

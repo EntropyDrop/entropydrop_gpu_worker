@@ -1,0 +1,14 @@
+{
+  "model_version": "SKING_DDJ_v130",
+  "inference_only": true,
+  "tensor_values_unchanged": true,
+  "source_checkpoint_sha256": {
+    "v1": "ea76c86719b61275ced6a98f910a1d4a2242644d10ae840fa281e4ab16e1f0be",
+    "v2": "83e67da562be63d6801ca5ab24ece530242ee686adf2e70fac870f65981be7c7",
+    "refiner": "72684f424df43c42d8266eacff1d304aebc6c89ec1b4b4bda5f9ea389b8d2fd9"
+  },
+  "source_contract_sha256": "c87e97beb9b3943125523ff1a3795cdef4a8fdb5d2ec0c3b9bd9847e13c7cf46",
+  "source_calibration_sha256": "89abaf5e00b8c5e9164041d4ebc1c253847ae588bc7d3a74521990dcfdc1608b",
+  "source_semantic_encoder_sha256": "36e4deffbaef061a2576705b0c36f93621e2ae20bf6274694821b0b492551b51",
+  "exported_checkpoint_sha256": "2716b52a550bf003f0cb962e9f8e0dbde5d2c2a3436d77dde42fca3d26528bf4"
+}

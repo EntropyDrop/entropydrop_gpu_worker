@@ -1,0 +1,24 @@
+{
+  "model_version": "SKING_DDJ_v130",
+  "input_size": [
+    512,
+    512
+  ],
+  "views": [
+    "front_left",
+    "back_left"
+  ],
+  "input_background": [
+    97,
+    2,
+    101
+  ],
+  "head_outer_threshold": 0.25,
+  "other_outer_threshold": 0.5,
+  "output_size": [
+    64,
+    64
+  ],
+  "output_mode": "RGBA",
+  "body_rgb_preserved": true
+}

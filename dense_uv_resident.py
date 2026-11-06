@@ -169,6 +169,13 @@ def _load_handler(root, stage):
     import torch
 
     torch.set_num_threads(4)
+    if stage == 'semantic':
+        sys.path.insert(0, str(root / 'runtime'))
+        from engine import UVEngine
+        engine = UVEngine(root)
+        def infer(request):
+            engine.infer(request['input'], request['output'])
+        return infer
     _bind_release(root)
     if stage == 'foreground':
         loader = importlib.import_module('SkingToolkit.dense_uv_parser.foreground_model')
@@ -245,7 +252,7 @@ def _open_parent_pidfd(pid):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--release-root', type=Path, required=True)
-    parser.add_argument('--stage', choices=('foreground', 'parser'), required=True)
+    parser.add_argument('--stage', choices=('foreground', 'parser', 'semantic'), required=True)
     parser.add_argument('--ipc-fd', type=int, required=True)
     parser.add_argument('--parent-pid', type=int, required=True)
     args = parser.parse_args()

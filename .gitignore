@@ -87,3 +87,9 @@ entrypoint.sh
 proxies.txt
 redis_urls.txt
 *.pem.pub
+# Local release weights/mappings are distributed as verified deployment assets.
+/releases/**/*.pt
+/releases/**/*.pth
+/verification/
+
+/v130_deployment_probe.py
